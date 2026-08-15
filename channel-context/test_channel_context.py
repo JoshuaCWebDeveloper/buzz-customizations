@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -33,7 +34,7 @@ class HookTests(unittest.TestCase):
             (directory / "a-first").write_text("A\n", encoding="utf-8")
             (directory / "middle").write_text("M", encoding="utf-8")
             output = run_hook(
-                {"hook_event_name": "UserPromptSubmit", "prompt": f"[Context]\nChannel: #buzz ({UUID})"},
+                {"hook_event_name": "UserPromptSubmit", "prompt": f"[Context]\nScope: channel\nChannel: #buzz ({UUID})"},
                 home,
             )
             self.assertEqual(output.returncode, 0)
@@ -55,7 +56,7 @@ class HookTests(unittest.TestCase):
                 "hook_event_name": "UserPromptSubmit",
                 "model": "gpt-5.6-luna",
                 "permission_mode": "default",
-                "prompt": f"[Context]\nChannel: #buzz ({UUID})",
+                "prompt": f"[Context]\nScope: channel\nChannel: #buzz ({UUID})",
                 "session_id": "session-1",
                 "transcript_path": None,
                 "turn_id": "turn-1",
@@ -81,6 +82,7 @@ class HookTests(unittest.TestCase):
             for payload in (
                 {"hook_event_name": "SessionStart", "prompt": f"Channel: x ({UUID})"},
                 {"hook_event_name": "UserPromptSubmit", "prompt": "not a Buzz frame"},
+                {"hook_event_name": "UserPromptSubmit", "prompt": f"Ordinary text\nChannel: x ({UUID})"},
             ):
                 self.assertEqual(run_hook(payload, home).stdout, b"")
             result = subprocess.run([sys.executable, str(HOOK)], input=b"{", stdout=subprocess.PIPE, check=False)
@@ -109,6 +111,37 @@ class DeploymentTests(unittest.TestCase):
             self.assertTrue((home / "hooks.json.buzz-customizations-backup").exists())
             subprocess.run([sys.executable, str(DEPLOY), "uninstall", "--codex-home", str(home)], check=True)
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+
+    def test_repeated_install_keeps_original_backup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = home / "hooks.json"
+            original = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "keep"}]}]}}
+            path.write_text(json.dumps(original), encoding="utf-8")
+            subprocess.run([sys.executable, str(DEPLOY), "install", "--codex-home", str(home), "--hook", str(HOOK)], check=True)
+            backup = home / "hooks.json.buzz-customizations-backup"
+            first_backup = backup.read_bytes()
+            changed = json.loads(path.read_text(encoding="utf-8"))
+            changed["hooks"]["Stop"].append({"hooks": [{"type": "command", "command": "changed"}]})
+            path.write_text(json.dumps(changed), encoding="utf-8")
+            subprocess.run([sys.executable, str(DEPLOY), "install", "--codex-home", str(home), "--hook", str(HOOK)], check=True)
+            self.assertEqual(backup.read_bytes(), first_backup)
+            self.assertEqual(json.loads(backup.read_text(encoding="utf-8")), original)
+
+    def test_atomic_replacement_leaves_active_config_unchanged_on_replace_failure(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("deploy", DEPLOY)
+        deploy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(deploy)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "hooks.json"
+            original = b'{"hooks": {"Stop": []}}\n'
+            path.write_bytes(original)
+            with mock.patch.object(deploy.os, "replace", side_effect=OSError("simulated interruption")):
+                with self.assertRaises(OSError):
+                    deploy.write_atomic(path, {"hooks": {"Stop": [{"hooks": []}]}})
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(path.parent.glob(".hooks.json.*")), [])
 
 
 if __name__ == "__main__":

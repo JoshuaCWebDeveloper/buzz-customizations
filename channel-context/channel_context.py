@@ -12,7 +12,7 @@ from pathlib import Path
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_CONTEXT_BYTES = 128 * 1024
 CHANNEL_RE = re.compile(
-    r"(?m)^\s*Channel:\s*[^\r\n]*?\(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)\s*$",
+    r"^\s*Channel:\s*[^\r\n]*?\(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)\s*$",
     re.IGNORECASE,
 )
 
@@ -22,8 +22,22 @@ def _read_stdin() -> bytes:
 
 
 def _channel_uuid(prompt: str) -> Optional[str]:
-    match = CHANNEL_RE.search(prompt)
-    return match.group(1).lower() if match else None
+    lines = prompt.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "[Context]":
+            continue
+        frame = []
+        for candidate in lines[index + 1 :]:
+            if not candidate.strip():
+                break
+            frame.append(candidate)
+        if not any(re.fullmatch(r"\s*Scope:\s*(?:channel|thread)\s*", item, re.IGNORECASE) for item in frame):
+            continue
+        for candidate in frame:
+            match = CHANNEL_RE.fullmatch(candidate)
+            if match:
+                return match.group(1).lower()
+    return None
 
 
 def _context(codex_home: Path, channel_uuid: str) -> str:

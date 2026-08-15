@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import tempfile
 from pathlib import Path
 
 HOOK_NAME = "UserPromptSubmit"
@@ -32,6 +33,20 @@ def remove_groups(config: dict) -> None:
         config["hooks"][HOOK_NAME] = [group for group in groups if not ours(group)]
 
 
+def write_atomic(path: Path, config: dict) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(config, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def install(home: Path, hook_path: Path) -> None:
     config_path = home / "hooks.json"
     config = load(config_path)
@@ -46,20 +61,17 @@ def install(home: Path, hook_path: Path) -> None:
         }
     )
     home.mkdir(parents=True, exist_ok=True)
-    if config_path.exists():
-        shutil.copy2(config_path, config_path.with_suffix(".json.buzz-customizations-backup"))
-    with config_path.open("w", encoding="utf-8") as handle:
-        json.dump(config, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
+    backup_path = config_path.with_suffix(".json.buzz-customizations-backup")
+    if config_path.exists() and not backup_path.exists():
+        shutil.copy2(config_path, backup_path)
+    write_atomic(config_path, config)
 
 
 def uninstall(home: Path) -> None:
     config_path = home / "hooks.json"
     config = load(config_path)
     remove_groups(config)
-    with config_path.open("w", encoding="utf-8") as handle:
-        json.dump(config, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
+    write_atomic(config_path, config)
 
 
 def main() -> int:
