@@ -1,0 +1,13 @@
+{
+  "name": "buzz-customizations",
+  "private": true,
+  "workspaces": [
+    "channel-context"
+  ],
+  "scripts": {
+    "verify": "nx run-many -t test lint --all"
+  },
+  "devDependencies": {
+    "nx": "23.1.1"
+  }
+}
