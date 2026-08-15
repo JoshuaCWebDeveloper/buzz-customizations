@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "channel-context",
+  "root": "packages/channel-context",
+  "targets": {
+    "test": {
+      "command": "python3 -m unittest discover -s packages/channel-context -p 'test_*.py'"
+    },
+    "lint": {
+      "command": "python3 -m py_compile packages/channel-context/*.py"
+    },
+    "deploy": {
+      "command": "python3 packages/channel-context/deploy.py install"
+    },
+    "undeploy": {
+      "command": "python3 packages/channel-context/deploy.py uninstall"
+    }
+  }
+}

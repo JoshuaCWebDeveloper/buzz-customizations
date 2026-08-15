@@ -2,7 +2,7 @@
   "name": "buzz-customizations",
   "private": true,
   "workspaces": [
-    "channel-context"
+    "packages/*"
   ],
   "scripts": {
     "verify": "nx run-many -t test lint --all"

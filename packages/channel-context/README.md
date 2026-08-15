@@ -26,8 +26,8 @@ Restoring the backup is an additional rollback option. This project was not depl
 
 Codex CLI 0.147.0 exposes `hooks` as a stable feature. Its installed native implementation dispatches `UserPromptSubmit` command hooks with JSON stdin and accepts `hookSpecificOutput.additionalContext`. The input schema and output shape are covered by the executable tests in this directory and the upstream Codex schema/source.
 
-Run tests with:
+Run tests from the repository root with:
 
 ```sh
-python3 -m unittest discover -s channel-context -p 'test_*.py'
+python3 -m unittest discover -s packages/channel-context -p 'test_*.py'
 ```
