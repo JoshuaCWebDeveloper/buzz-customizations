@@ -12,7 +12,7 @@ from pathlib import Path
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_CONTEXT_BYTES = 128 * 1024
 CHANNEL_RE = re.compile(
-    r"^\s*Channel:\s*[^\r\n]*?\(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)\s*$",
+    r"^\s*Channel:\s*[^\r\n]*?\(\#?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)\s*$",
     re.IGNORECASE,
 )
 

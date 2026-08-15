@@ -67,6 +67,25 @@ class HookTests(unittest.TestCase):
             self.assertEqual(result["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
             self.assertEqual(result["hookSpecificOutput"]["additionalContext"], "contract context")
 
+    def test_accepts_live_buzz_channel_uuid_with_hash_prefix(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            directory = home / "channel-context" / UUID
+            directory.mkdir(parents=True)
+            (directory / "context.md").write_text("live frame context", encoding="utf-8")
+            output = run_hook(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": f"[Context]\nScope: thread\nChannel: buzz-customizations (#{UUID})\nThread root: event-id",
+                },
+                home,
+            )
+            self.assertEqual(output.returncode, 0)
+            self.assertEqual(
+                json.loads(output.stdout)["hookSpecificOutput"]["additionalContext"],
+                "live frame context",
+            )
+
     def test_missing_empty_and_non_regular_entries_are_noop(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
