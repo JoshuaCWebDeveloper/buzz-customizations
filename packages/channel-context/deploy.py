@@ -173,7 +173,13 @@ def install(home: Path, hook_path: Path, codex_bin: str) -> None:
     groups.append(
         {
             "__buzz_customization": GROUP_MARKER,
-            "hooks": [{"type": "command", "command": shlex.quote(str(hook_path.resolve()))}],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": shlex.quote(str(hook_path.resolve())),
+                    "additionalContextLimit": 0,
+                }
+            ],
         }
     )
     home.mkdir(parents=True, exist_ok=True)

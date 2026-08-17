@@ -12,7 +12,7 @@ Run from this directory:
 python3 deploy.py install
 ```
 
-Use `--codex-home PATH` for a staging home or an explicitly selected user home. Installation updates only the `UserPromptSubmit` array, preserves unrelated JSON, and writes `hooks.json.buzz-customizations-backup` before replacement. It asks the installed Codex app server for the hook's exact key and current hash, then atomically records that hash under `[hooks.state]` in `config.toml` so the hook is trusted and runnable. Existing `config.toml` content is preserved, with a one-time `config.toml.buzz-customizations-backup`. Both backups remain stable across repeated installs. The marked hook group is replaced on repeated installs and its trust hash is refreshed. Use `--codex-bin PATH` when `codex` is not on `PATH`.
+Use `--codex-home PATH` for a staging home or an explicitly selected user home. Installation updates only the `UserPromptSubmit` array, preserves unrelated JSON, and writes `hooks.json.buzz-customizations-backup` before replacement. The installed handler sets `additionalContextLimit` to `0` so Codex passes the complete channel context to the model instead of spilling oversized output to disk and substituting a truncated preview. It asks the installed Codex app server for the hook's exact key and current hash, then atomically records that hash under `[hooks.state]` in `config.toml` so the hook is trusted and runnable. Existing `config.toml` content is preserved, with a one-time `config.toml.buzz-customizations-backup`. Both backups remain stable across repeated installs. The marked hook group is replaced on repeated installs and its trust hash is refreshed. Use `--codex-bin PATH` when `codex` is not on `PATH`.
 
 To remove the customization while preserving other hooks:
 

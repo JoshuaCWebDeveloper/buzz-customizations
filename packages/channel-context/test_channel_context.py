@@ -25,7 +25,7 @@ def run_hook(payload, home):
 
 
 def fake_codex(home: Path) -> Path:
-    path = home / "fake-codex"
+    path = home / f"fake-codex-{len(list(home.glob('fake-codex-*')))}"
     path.write_text(
         """#!/usr/bin/env python3
 import json
@@ -166,6 +166,7 @@ class DeploymentTests(unittest.TestCase):
             subprocess.run(deploy_command("install", home), check=True)
             installed = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(installed["hooks"]["UserPromptSubmit"][0], original["hooks"]["UserPromptSubmit"][0])
+            self.assertEqual(installed["hooks"]["UserPromptSubmit"][1]["hooks"][0]["additionalContextLimit"], 0)
             self.assertTrue((home / "hooks.json.buzz-customizations-backup").exists())
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('trusted_hash = "sha256:test"', config)
@@ -193,6 +194,13 @@ class DeploymentTests(unittest.TestCase):
             changed["hooks"]["Stop"].append({"hooks": [{"type": "command", "command": "changed"}]})
             path.write_text(json.dumps(changed), encoding="utf-8")
             subprocess.run(deploy_command("install", home), check=True)
+            reinstalled = json.loads(path.read_text(encoding="utf-8"))
+            installed_group = next(
+                group
+                for group in reinstalled["hooks"]["UserPromptSubmit"]
+                if group.get("__buzz_customization") == "buzz-customizations/channel-context"
+            )
+            self.assertEqual(installed_group["hooks"][0]["additionalContextLimit"], 0)
             self.assertEqual(backup.read_bytes(), first_backup)
             self.assertEqual(json.loads(backup.read_text(encoding="utf-8")), original)
             self.assertEqual(config_backup.read_bytes(), first_config_backup)
