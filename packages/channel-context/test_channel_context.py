@@ -24,6 +24,41 @@ def run_hook(payload, home):
     )
 
 
+def fake_codex(home: Path) -> Path:
+    path = home / "fake-codex"
+    path.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+
+home = Path(os.environ["CODEX_HOME"])
+config = json.loads((home / "hooks.json").read_text())
+command = config["hooks"]["UserPromptSubmit"][-1]["hooks"][0]["command"]
+for line in __import__("sys").stdin:
+    request = json.loads(line)
+    if request.get("id") == 1:
+        print(json.dumps({"id": 1, "result": {"codexHome": str(home)}}), flush=True)
+    elif request.get("id") == 2:
+        groups = config["hooks"]["UserPromptSubmit"]
+        group_index = next(index for index, group in enumerate(groups) if group.get("__buzz_customization") == "buzz-customizations/channel-context")
+        key = f"{(home / 'hooks.json').resolve()}:user_prompt_submit:{group_index}:0"
+        hook = {"eventName": "userPromptSubmit", "command": command, "sourcePath": str((home / "hooks.json").resolve()), "key": key, "currentHash": "sha256:test"}
+        print(json.dumps({"id": 2, "result": {"data": [{"hooks": [hook]}]}}), flush=True)
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
+    return path
+
+
+def deploy_command(action: str, home: Path, hook: Path = HOOK) -> list[str]:
+    command = [sys.executable, str(DEPLOY), action, "--codex-home", str(home)]
+    if action == "install":
+        command.extend(("--hook", str(hook), "--codex-bin", str(fake_codex(home))))
+    return command
+
+
 class HookTests(unittest.TestCase):
     def test_extracts_channel_sorts_and_concatenates_exactly(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -124,12 +159,23 @@ class DeploymentTests(unittest.TestCase):
             path = home / "hooks.json"
             original = {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "keep"}]}], "Stop": []}, "other": True}
             path.write_text(json.dumps(original), encoding="utf-8")
-            subprocess.run([sys.executable, str(DEPLOY), "install", "--codex-home", str(home), "--hook", str(HOOK)], check=True)
+            unrelated_key = f"{path.resolve()}:user_prompt_submit:0:0"
+            (home / "config.toml").write_text(
+                f'[hooks.state.{json.dumps(unrelated_key)}]\ntrusted_hash = "sha256:keep"\n', encoding="utf-8"
+            )
+            subprocess.run(deploy_command("install", home), check=True)
             installed = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(installed["hooks"]["UserPromptSubmit"][0], original["hooks"]["UserPromptSubmit"][0])
             self.assertTrue((home / "hooks.json.buzz-customizations-backup").exists())
-            subprocess.run([sys.executable, str(DEPLOY), "uninstall", "--codex-home", str(home)], check=True)
+            config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('trusted_hash = "sha256:test"', config)
+            self.assertIn('trusted_hash = "sha256:keep"', config)
+            self.assertTrue((home / "config.toml.buzz-customizations-backup").exists())
+            subprocess.run(deploy_command("uninstall", home), check=True)
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+            uninstalled_config = (home / "config.toml").read_text(encoding="utf-8")
+            self.assertNotIn('trusted_hash = "sha256:test"', uninstalled_config)
+            self.assertIn('trusted_hash = "sha256:keep"', uninstalled_config)
 
     def test_repeated_install_keeps_original_backup(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -137,15 +183,20 @@ class DeploymentTests(unittest.TestCase):
             path = home / "hooks.json"
             original = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "keep"}]}]}}
             path.write_text(json.dumps(original), encoding="utf-8")
-            subprocess.run([sys.executable, str(DEPLOY), "install", "--codex-home", str(home), "--hook", str(HOOK)], check=True)
+            (home / "config.toml").write_text('[projects."/keep"]\ntrust_level = "trusted"\n', encoding="utf-8")
+            subprocess.run(deploy_command("install", home), check=True)
             backup = home / "hooks.json.buzz-customizations-backup"
             first_backup = backup.read_bytes()
+            config_backup = home / "config.toml.buzz-customizations-backup"
+            first_config_backup = config_backup.read_bytes()
             changed = json.loads(path.read_text(encoding="utf-8"))
             changed["hooks"]["Stop"].append({"hooks": [{"type": "command", "command": "changed"}]})
             path.write_text(json.dumps(changed), encoding="utf-8")
-            subprocess.run([sys.executable, str(DEPLOY), "install", "--codex-home", str(home), "--hook", str(HOOK)], check=True)
+            subprocess.run(deploy_command("install", home), check=True)
             self.assertEqual(backup.read_bytes(), first_backup)
             self.assertEqual(json.loads(backup.read_text(encoding="utf-8")), original)
+            self.assertEqual(config_backup.read_bytes(), first_config_backup)
+            self.assertEqual((home / "config.toml").read_text().count("trusted_hash"), 1)
 
     def test_atomic_replacement_leaves_active_config_unchanged_on_replace_failure(self):
         import importlib.util

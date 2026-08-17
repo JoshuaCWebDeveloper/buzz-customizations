@@ -12,7 +12,7 @@ Run from this directory:
 python3 deploy.py install
 ```
 
-Use `--codex-home PATH` for a staging home or an explicitly selected user home. Installation updates only the `UserPromptSubmit` array, preserves unrelated JSON, and writes `hooks.json.buzz-customizations-backup` before replacement. That backup is created only once and remains the stable pre-customization rollback artifact across repeated installs. Config replacement is atomic. It marks its own group so repeated installs replace only the customization's previous group.
+Use `--codex-home PATH` for a staging home or an explicitly selected user home. Installation updates only the `UserPromptSubmit` array, preserves unrelated JSON, and writes `hooks.json.buzz-customizations-backup` before replacement. It asks the installed Codex app server for the hook's exact key and current hash, then atomically records that hash under `[hooks.state]` in `config.toml` so the hook is trusted and runnable. Existing `config.toml` content is preserved, with a one-time `config.toml.buzz-customizations-backup`. Both backups remain stable across repeated installs. The marked hook group is replaced on repeated installs and its trust hash is refreshed. Use `--codex-bin PATH` when `codex` is not on `PATH`.
 
 To remove the customization while preserving other hooks:
 
@@ -20,7 +20,7 @@ To remove the customization while preserving other hooks:
 python3 deploy.py uninstall --codex-home PATH
 ```
 
-Restoring the backup is an additional rollback option. This project was not deployed to agent-1's active Codex home.
+Uninstall removes both the marked hook group and its matching trust-state entry while preserving unrelated hook and Codex configuration. Restoring the backups is an additional rollback option.
 
 ## Contract
 
