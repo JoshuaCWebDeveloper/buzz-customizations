@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "base-prompt",
+  "root": "packages/base-prompt",
+  "targets": {
+    "test": {
+      "command": "python3 -m unittest discover -s packages/base-prompt -p 'test_*.py'"
+    },
+    "lint": {
+      "command": "python3 -m py_compile packages/base-prompt/*.py"
+    },
+    "deploy": {
+      "command": "python3 packages/base-prompt/deploy.py install"
+    },
+    "undeploy": {
+      "command": "python3 packages/base-prompt/deploy.py uninstall"
+    }
+  }
+}
