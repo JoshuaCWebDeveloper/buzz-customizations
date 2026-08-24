@@ -1,26 +1,56 @@
 # custom-grok-acp
 
-This independent customization is a drop-in `grok-acp` wrapper. It speaks ACP stdio (newline-delimited JSON-RPC), forwards every message to the real `grok` binary, and injects per-channel context into `session/prompt` turns that are framed by Buzz.
+This independent customization is a drop-in `grok-acp` wrapper. It speaks ACP stdio (newline-delimited JSON-RPC), forwards every message to the real `grok` binary, and runs command hooks that can control the prompt and extra context Grok Build sees on `session/prompt`.
 
-The wrapper reads the same file contract as [`channel-context`](../channel-context/README.md): a `[Context]` block with `Scope: channel|thread` and `Channel: ... (<UUID>)`, then concatenates regular files in filename order. Missing, empty, malformed, oversized, unreadable, non-UTF8, or non-Buzz inputs fail open and the original line is forwarded unchanged. Context is bounded at 128 KiB; oversized context is skipped rather than partially injected. Already-injected prompts are left alone.
+It does not implement channel context itself. [`channel-context`](../channel-context/README.md) registers a hook through this interface.
 
-Injection is an extra ACP text block:
+Missing, empty, malformed, crashing, timed-out, or oversized hooks fail open and the original line is forwarded unchanged. A hook's `additionalContext` is skipped when it exceeds 128 KiB. Already-valid ACP lines are re-serialized only when a hook changes the prompt.
+
+## Hook interface
+
+Hooks are configured in `$CUSTOM_GROK_ACP_HOME/hooks.json`, defaulting to `/var/lib/buzz-server/custom-grok-acp.d/hooks.json`:
 
 ```json
-{"type": "text", "text": "[Channel Context]\n..."}
+{
+  "hooks": {
+    "session/prompt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 /path/to/hook.py"
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-appended to `params.prompt`. Grok 1.0.5 has no `UserPromptSubmit` `additionalContext` path; this is the per-turn input it actually honors.
+Groups run in order. Each command receives JSON on stdin:
 
-## File lookup
+```json
+{
+  "method": "session/prompt",
+  "params": {
+    "sessionId": "sess-1",
+    "prompt": [{"type": "text", "text": "..."}]
+  }
+}
+```
 
-The first non-empty match wins:
+Later hooks see the prompt after earlier hooks have applied. Stdout must be a JSON object. Empty stdout is a no-op. Supported fields:
 
-1. `$BUZZ_CHANNEL_CONTEXT_HOME/<UUID>/` when that environment variable is set
-2. `$GROK_HOME/channel-context/<UUID>/`
-3. `$CODEX_HOME/channel-context/<UUID>/`, defaulting `CODEX_HOME` to `~/.codex`
+| Field | Effect |
+| --- | --- |
+| `prompt` | Replace the entire ACP `params.prompt` array |
+| `prepend` | Content blocks inserted at the front of the prompt |
+| `append` | Content blocks inserted at the end of the prompt |
+| `additionalContext` | Non-empty string appended as `{"type": "text", "text": "..."}` |
 
-Codex-deployed files therefore work without a second copy.
+Non-zero exit, invalid JSON, a timeout (default 5s, override with `CUSTOM_GROK_ACP_HOOK_TIMEOUT`), or a non-string `additionalContext` skips that hook.
+
+ACP stdio messages must not contain embedded newlines. The wrapper forwards `initialize`, `session/new`, `session/cancel`, and any `session/prompt` that no hook changes as received.
 
 ## Install and rollback
 
@@ -30,7 +60,7 @@ Run from this directory:
 python3 deploy.py install
 ```
 
-Use `--destination PATH` for a staging command or an explicitly selected install path. The default destination is `/var/lib/buzz-server/custom-grok-acp`. Install copies this package's wrapper byte-for-byte and marks it executable. It does not replace the Buzz `grok-acp` runtime shim.
+Use `--destination PATH` for a staging command. The default destination is `/var/lib/buzz-server/custom-grok-acp`. Install copies this package's wrapper byte-for-byte, marks it executable, and creates `$CUSTOM_GROK_ACP_HOME` (default `/var/lib/buzz-server/custom-grok-acp.d`) if needed. It does not replace the Buzz `grok-acp` runtime shim and does not write `hooks.json`.
 
 Point Grok-managed agents at the installed command instead of `grok-acp`. Arguments are forwarded unchanged, so Buzz can keep launching:
 
@@ -46,11 +76,9 @@ To remove the installed command:
 python3 deploy.py uninstall --destination PATH
 ```
 
-Uninstall deletes only the selected destination file.
+Uninstall deletes only the selected destination file. Hook config under `--home` is left in place so other customizations can keep their registrations.
 
-## Contract
-
-ACP stdio messages are newline-delimited JSON-RPC and must not contain embedded newlines. The wrapper re-serializes a line only when it injects; every other line is forwarded as received, including `initialize`, `session/new`, `session/cancel`, heartbeats without a Buzz `[Context]` frame, and `Scope: dm`.
+## Tests
 
 Run tests from the repository root with:
 

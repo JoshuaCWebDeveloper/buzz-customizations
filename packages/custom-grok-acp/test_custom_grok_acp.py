@@ -1,7 +1,7 @@
 import hashlib
 import json
 import os
-import stat
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -11,7 +11,6 @@ from pathlib import Path
 HERE = Path(__file__).parent
 WRAPPER = HERE / "custom_grok_acp.py"
 DEPLOY = HERE / "deploy.py"
-UUID = "12345678-1234-4234-8234-123456789abc"
 
 
 def write_fake_grok(home: Path, extra: str = "") -> Path:
@@ -23,7 +22,7 @@ import sys
 from pathlib import Path
 
 log = Path(os.environ["FAKE_GROK_LOG"])
-log.write_text(" ".join(sys.argv) + "\\n", encoding="utf-8")
+log.write_text(" ".join(sys.argv) + "\\nGROK_HOME=" + os.environ.get("GROK_HOME", "") + "\\n", encoding="utf-8")
 sys.stderr.write("child-stderr\\n")
 sys.stderr.flush()
 """
@@ -42,6 +41,26 @@ while True:
     return path
 
 
+def write_hook(home: Path, body: str) -> Path:
+    path = home / "hook.py"
+    path.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+    path.chmod(0o700)
+    return path
+
+
+def hook_command(path: Path) -> str:
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(path))}"
+
+
+def write_hooks(home: Path, commands) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    groups = [{"hooks": [{"type": "command", "command": command}]} for command in commands]
+    (home / "hooks.json").write_text(
+        json.dumps({"hooks": {"session/prompt": groups}}),
+        encoding="utf-8",
+    )
+
+
 def prompt_message(text: str, method: str = "session/prompt") -> dict:
     return {
         "jsonrpc": "2.0",
@@ -51,20 +70,15 @@ def prompt_message(text: str, method: str = "session/prompt") -> dict:
     }
 
 
-def buzz_prompt(scope: str = "thread", uuid: str = UUID) -> str:
-    return f"[Context]\nScope: {scope}\nChannel: buzz-customizations (#{uuid})\n\nhello"
-
-
 def run_wrapper(messages, home: Path, inner: Path, extra_env=None, raw: bytes = None):
     if raw is None:
         raw = b"".join(json.dumps(message, separators=(",", ":")).encode() + b"\n" for message in messages)
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["GROK_HOME"] = str(home)
+    env["CUSTOM_GROK_ACP_HOME"] = str(home)
     env["CUSTOM_GROK_ACP_INNER"] = str(inner)
     env["FAKE_GROK_LOG"] = str(home / "fake.log")
-    env.pop("CODEX_HOME", None)
-    env.pop("BUZZ_CHANNEL_CONTEXT_HOME", None)
     env.pop("GROK_BIN", None)
     if extra_env:
         env.update(extra_env)
@@ -83,156 +97,130 @@ def decode_lines(output: bytes) -> list:
     return [json.loads(line) for line in output.splitlines() if line]
 
 
-class InjectionTests(unittest.TestCase):
-    def test_appends_sorted_channel_context_to_session_prompt(self):
+class WrapperTests(unittest.TestCase):
+    def test_passthrough_without_hooks(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
-            directory = home / "channel-context" / UUID
-            directory.mkdir(parents=True)
-            (directory / "z-last").write_text("Z\n", encoding="utf-8")
-            (directory / "a-first").write_text("A\n", encoding="utf-8")
-            (directory / "middle").write_text("M", encoding="utf-8")
-            inner = write_fake_grok(home)
-            output = run_wrapper([prompt_message(buzz_prompt("channel"))], home, inner)
-            self.assertEqual(output.returncode, 0, output.stderr)
-            message = decode_lines(output.stdout)[0]
-            self.assertEqual(
-                message["params"]["prompt"],
-                [
-                    {"type": "text", "text": buzz_prompt("channel")},
-                    {"type": "text", "text": "[Channel Context]\nA\nMZ\n"},
-                ],
-            )
-            self.assertEqual((home / "fake.log").read_text(encoding="utf-8"), f"{inner} agent --always-approve stdio\n")
-            self.assertIn(b"child-stderr\n", output.stderr)
-
-    def test_accepts_live_buzz_thread_frame_with_hash_prefix(self):
-        with tempfile.TemporaryDirectory() as temp:
-            home = Path(temp)
-            directory = home / "channel-context" / UUID
-            directory.mkdir(parents=True)
-            (directory / "context.md").write_text("live frame context", encoding="utf-8")
-            output = run_wrapper([prompt_message(buzz_prompt("thread"))], home, write_fake_grok(home))
-            self.assertEqual(output.returncode, 0, output.stderr)
-            self.assertEqual(
-                decode_lines(output.stdout)[0]["params"]["prompt"][-1]["text"],
-                "[Channel Context]\nlive frame context",
-            )
-
-    def test_reads_codex_home_when_grok_files_are_absent(self):
-        with tempfile.TemporaryDirectory() as temp:
-            home = Path(temp)
-            grok_home = home / "grok"
-            codex_home = home / "codex"
-            grok_home.mkdir()
-            directory = codex_home / "channel-context" / UUID
-            directory.mkdir(parents=True)
-            (directory / "context.md").write_text("from codex", encoding="utf-8")
-            output = run_wrapper(
-                [prompt_message(buzz_prompt())],
-                grok_home,
-                write_fake_grok(grok_home),
-                extra_env={"GROK_HOME": str(grok_home), "CODEX_HOME": str(codex_home), "HOME": str(home)},
-            )
-            self.assertEqual(output.returncode, 0, output.stderr)
-            self.assertEqual(
-                decode_lines(output.stdout)[0]["params"]["prompt"][-1]["text"],
-                "[Channel Context]\nfrom codex",
-            )
-
-    def test_override_home_wins_over_grok_and_codex(self):
-        with tempfile.TemporaryDirectory() as temp:
-            home = Path(temp)
-            override = home / "override"
-            directory = override / UUID
-            directory.mkdir(parents=True)
-            (directory / "context.md").write_text("override context", encoding="utf-8")
-            grok_dir = home / "channel-context" / UUID
-            grok_dir.mkdir(parents=True)
-            (grok_dir / "context.md").write_text("grok context", encoding="utf-8")
-            output = run_wrapper(
-                [prompt_message(buzz_prompt())],
-                home,
-                write_fake_grok(home),
-                extra_env={"BUZZ_CHANNEL_CONTEXT_HOME": str(override)},
-            )
-            self.assertEqual(
-                decode_lines(output.stdout)[0]["params"]["prompt"][-1]["text"],
-                "[Channel Context]\noverride context",
-            )
-
-    def test_preserves_non_prompt_and_unframed_lines(self):
-        with tempfile.TemporaryDirectory() as temp:
-            home = Path(temp)
-            directory = home / "channel-context" / UUID
-            directory.mkdir(parents=True)
-            (directory / "context.md").write_text("should not appear", encoding="utf-8")
             inner = write_fake_grok(home)
             initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}}
-            session_new = {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": str(home)}}
-            dm = prompt_message(buzz_prompt("dm"))
-            heartbeat = prompt_message("ok?")
-            output = run_wrapper([initialize, session_new, dm, heartbeat], home, inner)
+            prompt = prompt_message("hello")
+            output = run_wrapper([initialize, prompt], home, inner)
             self.assertEqual(output.returncode, 0, output.stderr)
-            self.assertEqual(decode_lines(output.stdout), [initialize, session_new, dm, heartbeat])
+            self.assertEqual(decode_lines(output.stdout), [initialize, prompt])
+            self.assertEqual(
+                (home / "fake.log").read_text(encoding="utf-8"),
+                f"{inner} agent --always-approve stdio\nGROK_HOME={home}\n",
+            )
+            self.assertIn(b"child-stderr\n", output.stderr)
 
-    def test_malformed_oversized_and_unreadable_inputs_fail_open(self):
+    def test_additional_context_is_appended_as_text_block(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
-            directory = home / "channel-context" / UUID
-            directory.mkdir(parents=True)
-            (directory / "subdir").mkdir()
+            hook = write_hook(
+                home,
+                """
+import json, sys
+payload = json.load(sys.stdin)
+print(json.dumps({"additionalContext": "from-hook"}))
+""",
+            )
+            write_hooks(home, [hook_command(hook)])
+            output = run_wrapper([prompt_message("hello")], home, write_fake_grok(home))
+            self.assertEqual(output.returncode, 0, output.stderr)
+            self.assertEqual(
+                decode_lines(output.stdout)[0]["params"]["prompt"],
+                [{"type": "text", "text": "hello"}, {"type": "text", "text": "from-hook"}],
+            )
+
+    def test_prompt_replace_prepend_and_append(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            hook = write_hook(
+                home,
+                """
+import json, sys
+json.load(sys.stdin)
+print(json.dumps({
+    "prompt": [{"type": "text", "text": "replaced"}],
+    "prepend": [{"type": "text", "text": "before"}],
+    "append": [{"type": "resource_link", "uri": "file:///tmp/x", "name": "x"}],
+    "additionalContext": "after",
+}))
+""",
+            )
+            write_hooks(home, [hook_command(hook)])
+            output = run_wrapper([prompt_message("hello")], home, write_fake_grok(home))
+            self.assertEqual(
+                decode_lines(output.stdout)[0]["params"]["prompt"],
+                [
+                    {"type": "text", "text": "before"},
+                    {"type": "text", "text": "replaced"},
+                    {"type": "resource_link", "uri": "file:///tmp/x", "name": "x"},
+                    {"type": "text", "text": "after"},
+                ],
+            )
+
+    def test_hooks_run_in_order_and_see_prior_prompt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            first = write_hook(
+                home,
+                """
+import json, sys
+print(json.dumps({"additionalContext": "one"}))
+""",
+            )
+            second = home / "hook2.py"
+            second.write_text(
+                """#!/usr/bin/env python3
+import json, sys
+payload = json.load(sys.stdin)
+texts = [block.get("text") for block in payload["params"]["prompt"]]
+print(json.dumps({"additionalContext": ",".join(texts)}))
+""",
+                encoding="utf-8",
+            )
+            second.chmod(0o700)
+            write_hooks(home, [hook_command(first), hook_command(second)])
+            output = run_wrapper([prompt_message("hello")], home, write_fake_grok(home))
+            self.assertEqual(
+                decode_lines(output.stdout)[0]["params"]["prompt"][-1]["text"],
+                "hello,one",
+            )
+
+    def test_malformed_timeout_crash_and_oversized_hooks_fail_open(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
             inner = write_fake_grok(home)
-            missing = run_wrapper([prompt_message(buzz_prompt())], home, inner)
-            self.assertEqual(decode_lines(missing.stdout)[0]["params"]["prompt"], prompt_message(buzz_prompt())["params"]["prompt"])
-            (directory / "large").write_bytes(b"x" * (128 * 1024 + 1))
-            oversized = run_wrapper([prompt_message(buzz_prompt())], home, inner)
-            self.assertEqual(len(decode_lines(oversized.stdout)[0]["params"]["prompt"]), 1)
-            (directory / "large").unlink()
-            (directory / "context.md").write_text("ok", encoding="utf-8")
-            os.chmod(directory / "context.md", 0)
-            try:
-                unreadable = run_wrapper([prompt_message(buzz_prompt())], home, inner)
-            finally:
-                os.chmod(directory / "context.md", stat.S_IRUSR | stat.S_IWUSR)
-            if os.geteuid() != 0:
-                self.assertEqual(len(decode_lines(unreadable.stdout)[0]["params"]["prompt"]), 1)
+            prompt = prompt_message("hello")
+            bad = write_hook(home, "import sys\nsys.stdout.write('{not-json')\n")
+            write_hooks(home, [hook_command(bad)])
+            output = run_wrapper([prompt], home, inner)
+            self.assertEqual(decode_lines(output.stdout), [prompt])
+
+            crash = write_hook(home, "raise SystemExit(2)\n")
+            write_hooks(home, [hook_command(crash)])
+            output = run_wrapper([prompt], home, inner)
+            self.assertEqual(decode_lines(output.stdout), [prompt])
+
+            huge = write_hook(
+                home,
+                f"""
+import json
+print(json.dumps({{"additionalContext": "{'x' * (128 * 1024 + 1)}"}}))
+""",
+            )
+            write_hooks(home, [hook_command(huge)])
+            output = run_wrapper([prompt], home, inner)
+            self.assertEqual(decode_lines(output.stdout), [prompt])
+
+            slow = write_hook(home, "import time\ntime.sleep(5)\n")
+            write_hooks(home, [hook_command(slow)])
+            output = run_wrapper([prompt], home, inner, extra_env={"CUSTOM_GROK_ACP_HOOK_TIMEOUT": "0.2"})
+            self.assertEqual(decode_lines(output.stdout), [prompt])
+
             raw = run_wrapper([], home, inner, raw=b"{not-json\n")
             self.assertEqual(raw.stdout, b"{not-json\n")
-
-    def test_does_not_double_inject(self):
-        with tempfile.TemporaryDirectory() as temp:
-            home = Path(temp)
-            directory = home / "channel-context" / UUID
-            directory.mkdir(parents=True)
-            (directory / "context.md").write_text("once", encoding="utf-8")
-            already = prompt_message(buzz_prompt())
-            already["params"]["prompt"].append({"type": "text", "text": "[Channel Context]\nalready"})
-            output = run_wrapper([already], home, write_fake_grok(home))
-            self.assertEqual(decode_lines(output.stdout)[0]["params"]["prompt"], already["params"]["prompt"])
-
-    def test_forwards_other_content_blocks(self):
-        with tempfile.TemporaryDirectory() as temp:
-            home = Path(temp)
-            directory = home / "channel-context" / UUID
-            directory.mkdir(parents=True)
-            (directory / "context.md").write_text("ctx", encoding="utf-8")
-            message = {
-                "jsonrpc": "2.0",
-                "id": 9,
-                "method": "session/prompt",
-                "params": {
-                    "sessionId": "sess-1",
-                    "prompt": [
-                        {"type": "text", "text": buzz_prompt()},
-                        {"type": "resource_link", "uri": "file:///tmp/x", "name": "x"},
-                    ],
-                },
-            }
-            output = run_wrapper([message], home, write_fake_grok(home))
-            prompt = decode_lines(output.stdout)[0]["params"]["prompt"]
-            self.assertEqual(prompt[1], {"type": "resource_link", "uri": "file:///tmp/x", "name": "x"})
-            self.assertEqual(prompt[2]["text"], "[Channel Context]\nctx")
 
     def test_missing_inner_binary_exits_127(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -243,13 +231,14 @@ class InjectionTests(unittest.TestCase):
 
 
 class DeploymentTests(unittest.TestCase):
-    def test_install_copies_executable_bytes_and_uninstall_removes_only_destination(self):
+    def test_install_copies_executable_creates_home_and_uninstall_keeps_hooks(self):
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp) / "nested" / "custom-grok-acp"
+            home = Path(temp) / "hooks-home"
             keep = Path(temp) / "keep"
             keep.write_text("keep\n", encoding="utf-8")
             result = subprocess.run(
-                [sys.executable, str(DEPLOY), "install", "--destination", str(destination)],
+                [sys.executable, str(DEPLOY), "install", "--destination", str(destination), "--home", str(home)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -261,15 +250,34 @@ class DeploymentTests(unittest.TestCase):
                 hashlib.sha256(WRAPPER.read_bytes()).hexdigest(),
             )
             self.assertTrue(os.access(destination, os.X_OK))
+            self.assertTrue(home.is_dir())
+            (home / "hooks.json").write_text("{}", encoding="utf-8")
             result = subprocess.run(
-                [sys.executable, str(DEPLOY), "uninstall", "--destination", str(destination)],
+                [sys.executable, str(DEPLOY), "uninstall", "--destination", str(destination), "--home", str(home)],
                 capture_output=True,
                 text=True,
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(destination.exists())
+            self.assertEqual((home / "hooks.json").read_text(encoding="utf-8"), "{}")
             self.assertEqual(keep.read_text(encoding="utf-8"), "keep\n")
+
+
+class ApplyHookOutputTests(unittest.TestCase):
+    def test_invalid_additional_context_skips_the_hook(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("custom_grok_acp", WRAPPER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        prompt = [{"type": "text", "text": "hello"}]
+        self.assertEqual(module.apply_hook_output(prompt, {"additionalContext": 1}), prompt)
+        self.assertEqual(module.apply_hook_output(prompt, {"prompt": "nope"}), prompt)
+        self.assertEqual(
+            module.apply_hook_output(prompt, {"additionalContext": "ok"}),
+            [{"type": "text", "text": "hello"}, {"type": "text", "text": "ok"}],
+        )
 
 
 if __name__ == "__main__":

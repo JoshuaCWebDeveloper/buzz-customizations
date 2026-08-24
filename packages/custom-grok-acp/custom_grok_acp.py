@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Drop-in grok-acp wrapper that injects Buzz channel context into session/prompt."""
+"""Drop-in grok-acp wrapper with a hook interface for prompt and context control."""
 
 import json
 import os
-import re
+import shlex
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import threading
@@ -15,108 +14,137 @@ from typing import Optional
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
 MAX_CONTEXT_BYTES = 128 * 1024
+MAX_HOOK_OUTPUT_BYTES = 256 * 1024
+DEFAULT_HOME = Path("/var/lib/buzz-server/custom-grok-acp.d")
 HOST_GROK_HOME = Path("/var/lib/buzz/grok")
-CHANNEL_RE = re.compile(
-    r"^\s*Channel:\s*[^\r\n]*?\(\#?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)\s*$",
-    re.IGNORECASE,
-)
+SESSION_PROMPT = "session/prompt"
 
 
-def _channel_uuid(prompt: str) -> Optional[str]:
-    lines = prompt.splitlines()
-    for index, line in enumerate(lines):
-        if line.strip() != "[Context]":
-            continue
-        frame = []
-        for candidate in lines[index + 1 :]:
-            if not candidate.strip():
-                break
-            frame.append(candidate)
-        if not any(re.fullmatch(r"\s*Scope:\s*(?:channel|thread)\s*", item, re.IGNORECASE) for item in frame):
-            continue
-        for candidate in frame:
-            match = CHANNEL_RE.fullmatch(candidate)
-            if match:
-                return match.group(1).lower()
-    return None
+def hook_home() -> Path:
+    return Path(os.environ.get("CUSTOM_GROK_ACP_HOME", str(DEFAULT_HOME)))
 
 
-def _concat(directory: Path) -> str:
-    if not directory.is_dir():
-        return ""
-    parts: list[str] = []
-    total = 0
+def hook_timeout_seconds() -> float:
     try:
-        entries = sorted(directory.iterdir(), key=lambda entry: entry.name)
-        for entry in entries:
-            if not stat.S_ISREG(entry.lstat().st_mode):
+        return float(os.environ.get("CUSTOM_GROK_ACP_HOOK_TIMEOUT", "5"))
+    except ValueError:
+        return 5.0
+
+
+def _load_hooks_config(home: Path) -> dict:
+    path = home / "hooks.json"
+    try:
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+        if isinstance(value, dict) and isinstance(value.get("hooks", {}), dict):
+            return value
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return {"hooks": {}}
+    return {"hooks": {}}
+
+
+def hook_commands(config: dict, event: str) -> list:
+    groups = config.get("hooks", {}).get(event, [])
+    if not isinstance(groups, list):
+        return []
+    commands = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        hooks = group.get("hooks")
+        if not isinstance(hooks, list):
+            continue
+        for hook in hooks:
+            if not isinstance(hook, dict):
                 continue
-            data = entry.read_bytes()
-            total += len(data)
-            if total > MAX_CONTEXT_BYTES:
-                return ""
-            parts.append(data.decode("utf-8"))
-    except (OSError, UnicodeError):
-        return ""
-    return "".join(parts)
+            hook_type = hook.get("type", "command")
+            if hook_type != "command":
+                continue
+            command = hook.get("command")
+            if isinstance(command, str) and command.strip():
+                commands.append(command)
+    return commands
 
 
-def _load(channel_uuid: str) -> str:
-    override = os.environ.get("BUZZ_CHANNEL_CONTEXT_HOME")
-    if override:
-        return _concat(Path(override) / channel_uuid)
-    homes: list[Path] = []
-    grok_home = os.environ.get("GROK_HOME")
-    if grok_home:
-        homes.append(Path(grok_home))
-    homes.append(Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")))
-    seen = set()
-    for home in homes:
-        resolved = home.resolve() if home.exists() else home
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        text = _concat(home / "channel-context" / channel_uuid)
-        if text:
-            return text
-    return ""
+def apply_hook_output(prompt: list, output: object) -> list:
+    if not isinstance(output, dict):
+        return prompt
+    extra = output.get("additionalContext")
+    if extra is not None:
+        if not isinstance(extra, str):
+            return prompt
+        try:
+            if len(extra.encode("utf-8")) > MAX_CONTEXT_BYTES:
+                return prompt
+        except UnicodeError:
+            return prompt
+    current = list(prompt)
+    replacement = output.get("prompt")
+    if isinstance(replacement, list):
+        current = list(replacement)
+    prepend = output.get("prepend")
+    if isinstance(prepend, list):
+        current = list(prepend) + current
+    append = output.get("append")
+    if isinstance(append, list):
+        current = current + list(append)
+    if isinstance(extra, str) and extra:
+        current = current + [{"type": "text", "text": extra}]
+    return current
 
 
-def _prompt_text(prompt: list) -> str:
-    parts = []
-    for block in prompt:
-        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-            parts.append(block["text"])
-    return "\n".join(parts)
+def _run_hook(command: str, envelope: dict) -> object:
+    try:
+        args = shlex.split(command)
+        if not args:
+            return None
+        payload = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        result = subprocess.run(
+            args,
+            input=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=hook_timeout_seconds(),
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        raw = result.stdout.strip()
+        if not raw or len(raw) > MAX_HOOK_OUTPUT_BYTES:
+            return None
+        return json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError, subprocess.TimeoutExpired):
+        return None
 
 
-def _already_injected(prompt: list) -> bool:
-    for block in prompt:
-        if not isinstance(block, dict) or not isinstance(block.get("text"), str):
-            continue
-        text = block["text"]
-        if text.lstrip().startswith("[Channel Context]") or "\n[Channel Context]\n" in text:
-            return True
-    return False
-
-
-def inject_message(message: object) -> object:
-    if not isinstance(message, dict) or message.get("method") != "session/prompt":
+def inject_message(message: object, commands: Optional[list] = None) -> object:
+    if not isinstance(message, dict) or message.get("method") != SESSION_PROMPT:
         return message
     params = message.get("params")
     if not isinstance(params, dict):
         return message
     prompt = params.get("prompt")
-    if not isinstance(prompt, list) or _already_injected(prompt):
+    if not isinstance(prompt, list):
         return message
-    channel_uuid = _channel_uuid(_prompt_text(prompt))
-    if channel_uuid is None:
+    if commands is None:
+        commands = hook_commands(_load_hooks_config(hook_home()), SESSION_PROMPT)
+    if not commands:
         return message
-    context = _load(channel_uuid)
-    if not context:
+    current = list(prompt)
+    changed = False
+    for command in commands:
+        envelope = {
+            "method": SESSION_PROMPT,
+            "params": {"sessionId": params.get("sessionId"), "prompt": current},
+        }
+        updated = apply_hook_output(current, _run_hook(command, envelope))
+        if updated != current:
+            current = updated
+            changed = True
+    if not changed:
         return message
     updated_params = dict(params)
-    updated_params["prompt"] = list(prompt) + [{"type": "text", "text": f"[Channel Context]\n{context}"}]
+    updated_params["prompt"] = current
     updated = dict(message)
     updated["params"] = updated_params
     return updated
@@ -142,7 +170,7 @@ def ensure_grok_home() -> None:
         os.environ["GROK_HOME"] = str(HOST_GROK_HOME)
 
 
-def resolve_command(argv: list[str]) -> list[str]:
+def resolve_command(argv: list) -> list:
     inner = os.environ.get("CUSTOM_GROK_ACP_INNER") or os.environ.get("GROK_BIN")
     if inner:
         return [inner, *argv]
@@ -177,7 +205,7 @@ def _pump_stdin(destination) -> None:
             destination.flush()
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: Optional[list] = None) -> int:
     ensure_grok_home()
     try:
         command = resolve_command(sys.argv[1:] if argv is None else argv)

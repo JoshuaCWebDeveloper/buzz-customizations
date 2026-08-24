@@ -1,8 +1,21 @@
 # channel-context
 
-This independent customization injects per-channel context into Codex turns that are framed by Buzz. The hook reads the `prompt` field from Codex's `UserPromptSubmit` JSON input, accepts a channel only from a `[Context]` block containing a valid `Scope: channel|thread` line and `Channel: ... (<UUID>)` line, and concatenates regular files in `$CODEX_HOME/channel-context/<UUID>/` in filename order.
+This independent customization injects per-channel context into Buzz-framed turns for Codex and Grok.
 
-Missing, empty, malformed, oversized, unreadable, or non-Buzz inputs fail open with no output. Context is bounded at 128 KiB; oversized context is skipped rather than partially injected.
+The loader accepts a channel only from a `[Context]` block containing a valid `Scope: channel|thread` line and `Channel: ... (<UUID>)` line, then concatenates regular files in `/var/lib/buzz/channel-context/<UUID>/` in filename order. Override the root with `BUZZ_CHANNEL_CONTEXT_HOME`. Missing, empty, malformed, oversized, unreadable, or non-Buzz inputs fail open. Context is bounded at 128 KiB; oversized context is skipped rather than partially injected.
+
+- **Codex:** a `UserPromptSubmit` command hook that returns `hookSpecificOutput.additionalContext`.
+- **Grok:** a [`custom-grok-acp`](../custom-grok-acp/README.md) `session/prompt` hook that returns `additionalContext` as a `[Channel Context]` text block. `custom-grok-acp` must be the agent command so the hook runs.
+
+## File location
+
+Canonical path:
+
+```text
+/var/lib/buzz/channel-context/<UUID>/
+```
+
+Put one regular file per concern, named so filename order is the intended concat order. This is shared by Codex and Grok. The previous `$CODEX_HOME/channel-context/<UUID>/` location is no longer read.
 
 ## Install and rollback
 
@@ -12,24 +25,28 @@ Run from this directory:
 python3 deploy.py install
 ```
 
-Use `--codex-home PATH` for a staging home or an explicitly selected user home. Installation updates only the `UserPromptSubmit` array, preserves unrelated JSON, and writes `hooks.json.buzz-customizations-backup` before replacement. The installed handler sets `additionalContextLimit` to `0` so Codex passes the complete channel context to the model instead of spilling oversized output to disk and substituting a truncated preview. It asks the installed Codex app server for the hook's exact key and current hash, then atomically records that hash under `[hooks.state]` in `config.toml` so the hook is trusted and runnable. Existing `config.toml` content is preserved, with a one-time `config.toml.buzz-customizations-backup`. Both backups remain stable across repeated installs. The marked hook group is replaced on repeated installs and its trust hash is refreshed. Use `--codex-bin PATH` when `codex` is not on `PATH`.
+Default deploy installs both runtimes:
+
+- Codex: updates `UserPromptSubmit` in `$CODEX_HOME/hooks.json`, preserves unrelated JSON, writes `hooks.json.buzz-customizations-backup` before replacement, sets `additionalContextLimit` to `0`, trusts the hook hash in `config.toml`.
+- Grok: registers this package's script as a `session/prompt` command hook in `$CUSTOM_GROK_ACP_HOME/hooks.json` (default `/var/lib/buzz-server/custom-grok-acp.d/hooks.json`) and creates `/var/lib/buzz/channel-context` when possible.
+- `--runtime codex` or `--runtime grok` installs one side. `--codex-home`, `--custom-grok-acp-home`, `--context-home`, `--hook`, and `--codex-bin` override paths.
+
+Grok injection still requires pointing the agent at the installed `custom-grok-acp` command. This package only registers the hook.
 
 To remove the customization while preserving other hooks:
 
 ```sh
-python3 deploy.py uninstall --codex-home PATH
+python3 deploy.py uninstall
 ```
 
-Uninstall removes both the marked hook group and its matching trust-state entry while preserving unrelated hook and Codex configuration. Restoring the backups is an additional rollback option.
+Uninstall removes the marked Codex group and its trust-state entry, and the marked Grok hook group. Restoring the backups is an additional rollback option.
 
 ## Contract
 
-Codex CLI 0.147.0 exposes `hooks` as a stable feature. Its installed native implementation dispatches `UserPromptSubmit` command hooks with JSON stdin and accepts `hookSpecificOutput.additionalContext`. The input schema and output shape are covered by the executable tests in this directory and the upstream Codex schema/source.
+Codex CLI 0.147.0 exposes `hooks` as a stable feature. Its installed native implementation dispatches `UserPromptSubmit` command hooks with JSON stdin and accepts `hookSpecificOutput.additionalContext`. Grok Build 1.0.5 does not honor that hook output; the Grok adapter uses the custom-grok-acp hook interface instead.
 
 Run tests from the repository root with:
 
 ```sh
 python3 -m unittest discover -s packages/channel-context -p 'test_*.py'
 ```
-
-Grok Build 1.0.5 does not honor Codex `UserPromptSubmit` hook output. Use [`custom-grok-acp`](../custom-grok-acp/README.md) to inject this same file contract into Grok ACP `session/prompt` turns.

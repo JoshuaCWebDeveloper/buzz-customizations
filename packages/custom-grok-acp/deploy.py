@@ -9,12 +9,14 @@ from pathlib import Path
 
 SOURCE = Path(__file__).with_name("custom_grok_acp.py")
 DEFAULT_DESTINATION = Path("/var/lib/buzz-server/custom-grok-acp")
+DEFAULT_HOME = Path("/var/lib/buzz-server/custom-grok-acp.d")
 
 
-def install(destination: Path) -> None:
+def install(destination: Path, home: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(SOURCE, destination)
     os.chmod(destination, 0o755)
+    home.mkdir(parents=True, exist_ok=True)
 
 
 def uninstall(destination: Path) -> None:
@@ -30,9 +32,15 @@ def main() -> int:
         default=DEFAULT_DESTINATION,
         help="installed command path (defaults to the host custom-grok-acp path)",
     )
+    parser.add_argument(
+        "--home",
+        type=Path,
+        default=Path(os.environ.get("CUSTOM_GROK_ACP_HOME", str(DEFAULT_HOME))),
+        help="hook config directory (hooks.json); created on install, left in place on uninstall",
+    )
     args = parser.parse_args()
     if args.action == "install":
-        install(args.destination)
+        install(args.destination, args.home)
     else:
         uninstall(args.destination)
     return 0
