@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install or remove channel-context and its Codex hook trust state."""
+"""Install or remove channel-context for Codex and custom-grok-acp."""
 
 import argparse
 import json
@@ -8,12 +8,16 @@ import selectors
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 HOOK_NAME = "UserPromptSubmit"
+GROK_EVENT = "session/prompt"
 GROUP_MARKER = "buzz-customizations/channel-context"
 APP_SERVER_TIMEOUT_SECONDS = 15
+DEFAULT_CONTEXT_HOME = Path("/var/lib/buzz/channel-context")
+DEFAULT_GROK_ACP_HOME = Path("/var/lib/buzz-server/custom-grok-acp.d")
 
 
 def load(path: Path) -> dict:
@@ -30,13 +34,13 @@ def ours(group: object) -> bool:
     return isinstance(group, dict) and group.get("__buzz_customization") == GROUP_MARKER
 
 
-def remove_groups(config: dict) -> None:
-    groups = config.setdefault("hooks", {}).setdefault(HOOK_NAME, [])
+def remove_groups(config: dict, event: str) -> None:
+    groups = config.setdefault("hooks", {}).setdefault(event, [])
     if isinstance(groups, list):
-        config["hooks"][HOOK_NAME] = [group for group in groups if not ours(group)]
+        config["hooks"][event] = [group for group in groups if not ours(group)]
 
 
-def our_hook_keys(config_path: Path, config: dict) -> list[str]:
+def our_hook_keys(config_path: Path, config: dict) -> list:
     groups = config.get("hooks", {}).get(HOOK_NAME, [])
     if not isinstance(groups, list):
         return []
@@ -67,7 +71,7 @@ def write_atomic(path: Path, config: dict) -> None:
     write_bytes_atomic(path, data)
 
 
-def _hook_identity(home: Path, hook_path: Path, codex_bin: str) -> tuple[str, str]:
+def _hook_identity(home: Path, hook_path: Path, codex_bin: str) -> tuple:
     requests = (
         json.dumps(
             {
@@ -162,11 +166,24 @@ def _set_trust(config_path: Path, key: str, current_hash: str) -> None:
     write_bytes_atomic(config_path, updated.encode())
 
 
-def install(home: Path, hook_path: Path, codex_bin: str) -> None:
+def ensure_context_home(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        sys.stderr.write(f"channel-context: could not create {path}: {exc}\n")
+
+
+def backup_once(path: Path) -> None:
+    backup_path = path.with_name(path.name + ".buzz-customizations-backup")
+    if path.exists() and not backup_path.exists():
+        shutil.copy2(path, backup_path)
+
+
+def install_codex(home: Path, hook_path: Path, codex_bin: str) -> None:
     config_path = home / "hooks.json"
     config = load(config_path)
     stale_trust_keys = our_hook_keys(config_path, config)
-    remove_groups(config)
+    remove_groups(config, HOOK_NAME)
     groups = config["hooks"].setdefault(HOOK_NAME, [])
     if not isinstance(groups, list):
         raise ValueError("hooks.UserPromptSubmit must be an array")
@@ -183,15 +200,11 @@ def install(home: Path, hook_path: Path, codex_bin: str) -> None:
         }
     )
     home.mkdir(parents=True, exist_ok=True)
-    backup_path = config_path.with_suffix(".json.buzz-customizations-backup")
-    if config_path.exists() and not backup_path.exists():
-        shutil.copy2(config_path, backup_path)
+    backup_once(config_path)
     write_atomic(config_path, config)
     key, current_hash = _hook_identity(home, hook_path, codex_bin)
     codex_config_path = home / "config.toml"
-    codex_config_backup = home / "config.toml.buzz-customizations-backup"
-    if codex_config_path.exists() and not codex_config_backup.exists():
-        shutil.copy2(codex_config_path, codex_config_backup)
+    backup_once(codex_config_path)
     if codex_config_path.exists():
         text = codex_config_path.read_text(encoding="utf-8")
         for stale_key in stale_trust_keys:
@@ -200,11 +213,11 @@ def install(home: Path, hook_path: Path, codex_bin: str) -> None:
     _set_trust(codex_config_path, key, current_hash)
 
 
-def uninstall(home: Path) -> None:
+def uninstall_codex(home: Path) -> None:
     config_path = home / "hooks.json"
     config = load(config_path)
     trust_keys = our_hook_keys(config_path, config)
-    remove_groups(config)
+    remove_groups(config, HOOK_NAME)
     write_atomic(config_path, config)
     codex_config_path = home / "config.toml"
     if codex_config_path.exists():
@@ -214,17 +227,65 @@ def uninstall(home: Path) -> None:
         write_bytes_atomic(codex_config_path, text.encode())
 
 
+def grok_hook_command(hook_path: Path) -> str:
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(hook_path.resolve()))}"
+
+
+def install_grok(home: Path, hook_path: Path) -> None:
+    config_path = home / "hooks.json"
+    config = load(config_path) if config_path.exists() else {"hooks": {}}
+    remove_groups(config, GROK_EVENT)
+    groups = config["hooks"].setdefault(GROK_EVENT, [])
+    if not isinstance(groups, list):
+        raise ValueError("hooks.session/prompt must be an array")
+    groups.append(
+        {
+            "__buzz_customization": GROUP_MARKER,
+            "hooks": [{"type": "command", "command": grok_hook_command(hook_path)}],
+        }
+    )
+    home.mkdir(parents=True, exist_ok=True)
+    backup_once(config_path)
+    write_atomic(config_path, config)
+
+
+def uninstall_grok(home: Path) -> None:
+    config_path = home / "hooks.json"
+    if not config_path.exists():
+        return
+    config = load(config_path)
+    remove_groups(config, GROK_EVENT)
+    write_atomic(config_path, config)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("install", "uninstall"))
     parser.add_argument("--codex-home", default=os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    parser.add_argument(
+        "--custom-grok-acp-home",
+        default=os.environ.get("CUSTOM_GROK_ACP_HOME", str(DEFAULT_GROK_ACP_HOME)),
+    )
+    parser.add_argument(
+        "--context-home",
+        default=os.environ.get("BUZZ_CHANNEL_CONTEXT_HOME", str(DEFAULT_CONTEXT_HOME)),
+    )
+    parser.add_argument("--runtime", choices=("all", "codex", "grok"), default="all")
     parser.add_argument("--hook", default=str(Path(__file__).with_name("channel_context.py")))
     parser.add_argument("--codex-bin", default=os.environ.get("CODEX_PATH", "codex"))
     args = parser.parse_args()
+    hook_path = Path(args.hook)
     if args.action == "install":
-        install(Path(args.codex_home), Path(args.hook), args.codex_bin)
+        ensure_context_home(Path(args.context_home))
+        if args.runtime in ("all", "codex"):
+            install_codex(Path(args.codex_home), hook_path, args.codex_bin)
+        if args.runtime in ("all", "grok"):
+            install_grok(Path(args.custom_grok_acp_home), hook_path)
     else:
-        uninstall(Path(args.codex_home))
+        if args.runtime in ("all", "codex"):
+            uninstall_codex(Path(args.codex_home))
+        if args.runtime in ("all", "grok"):
+            uninstall_grok(Path(args.custom_grok_acp_home))
     return 0
 
 

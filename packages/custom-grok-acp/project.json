@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "custom-grok-acp",
+  "root": "packages/custom-grok-acp",
+  "targets": {
+    "test": {
+      "command": "python3 -m unittest discover -s packages/custom-grok-acp -p 'test_*.py'"
+    },
+    "lint": {
+      "command": "python3 -m py_compile packages/custom-grok-acp/*.py"
+    },
+    "deploy": {
+      "command": "python3 packages/custom-grok-acp/deploy.py install"
+    },
+    "undeploy": {
+      "command": "python3 packages/custom-grok-acp/deploy.py uninstall"
+    }
+  }
+}
