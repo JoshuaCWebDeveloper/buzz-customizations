@@ -192,7 +192,7 @@ def _pump(source, destination) -> None:
 def _pump_stdin(destination) -> None:
     leftover = b""
     while True:
-        chunk = sys.stdin.buffer.read(65536)
+        chunk = sys.stdin.buffer.read1(65536)
         if not chunk:
             if leftover:
                 destination.write(leftover)
