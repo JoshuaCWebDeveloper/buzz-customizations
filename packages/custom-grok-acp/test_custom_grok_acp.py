@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import select
 import shlex
 import subprocess
 import sys
@@ -98,6 +99,44 @@ def decode_lines(output: bytes) -> list:
 
 
 class WrapperTests(unittest.TestCase):
+    def test_forwards_a_small_live_frame_without_waiting_for_eof(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            inner = write_fake_grok(home)
+            message = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}}
+            env = os.environ.copy()
+            env.update(
+                {
+                    "HOME": str(home),
+                    "GROK_HOME": str(home),
+                    "CUSTOM_GROK_ACP_HOME": str(home),
+                    "CUSTOM_GROK_ACP_INNER": str(inner),
+                    "FAKE_GROK_LOG": str(home / "fake.log"),
+                }
+            )
+            process = subprocess.Popen(
+                [sys.executable, str(WRAPPER), "agent", "stdio"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            try:
+                assert process.stdin is not None and process.stdout is not None
+                process.stdin.write(json.dumps(message, separators=(",", ":")).encode() + b"\n")
+                process.stdin.flush()
+                readable, _, _ = select.select([process.stdout], [], [], 2)
+                self.assertTrue(readable, "small live ACP frame was buffered until EOF")
+                self.assertEqual(json.loads(process.stdout.readline()), message)
+            finally:
+                if process.stdin is not None:
+                    process.stdin.close()
+                process.wait(timeout=5)
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
+
     def test_passthrough_without_hooks(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
