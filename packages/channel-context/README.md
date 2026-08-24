@@ -31,3 +31,5 @@ Run tests from the repository root with:
 ```sh
 python3 -m unittest discover -s packages/channel-context -p 'test_*.py'
 ```
+
+Grok Build 1.0.5 does not honor Codex `UserPromptSubmit` hook output. Use [`custom-grok-acp`](../custom-grok-acp/README.md) to inject this same file contract into Grok ACP `session/prompt` turns.

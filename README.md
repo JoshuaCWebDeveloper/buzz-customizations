@@ -33,4 +33,5 @@ The safe aggregate check is `npm run verify`, which runs `test` and `lint` for e
 ## Package index
 
 - [`packages/channel-context`](packages/channel-context/README.md): deterministic Buzz channel context for Codex `UserPromptSubmit`.
+- [`packages/custom-grok-acp`](packages/custom-grok-acp/README.md): drop-in `grok-acp` wrapper that injects the same channel context into Grok `session/prompt` turns.
 - [`packages/base-prompt`](packages/base-prompt/README.md): deploys the managed Buzz base prompt.
