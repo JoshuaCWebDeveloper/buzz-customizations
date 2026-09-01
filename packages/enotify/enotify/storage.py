@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json, sqlite3, uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from .models import EventTriggerSpec, NotificationAddressSpec, canonical_json
 
@@ -12,22 +13,8 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db=sqlite3.connect(self.path)
         self.db.row_factory=sqlite3.Row
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.executescript("""CREATE TABLE IF NOT EXISTS migrations(version INTEGER PRIMARY KEY);
-        CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, frequency TEXT NOT NULL,
-          event_json TEXT NOT NULL, notification_json TEXT NOT NULL, state TEXT NOT NULL, reason TEXT,
-          created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS occurrences(id TEXT PRIMARY KEY, source TEXT NOT NULL, observed_at TEXT NOT NULL,
-          cursor TEXT, payload_json TEXT, UNIQUE(source,id));
-        CREATE TABLE IF NOT EXISTS one_reservations(subscription_id TEXT PRIMARY KEY, occurrence_id TEXT NOT NULL,
-          revision INTEGER NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS notification_attempts(subscription_id TEXT NOT NULL, occurrence_id TEXT NOT NULL,
-          attempt INTEGER NOT NULL, delivery_key TEXT NOT NULL, outcome TEXT, error TEXT, created_at TEXT NOT NULL,
-          PRIMARY KEY(subscription_id,occurrence_id,attempt));
-        CREATE TABLE IF NOT EXISTS accepted_deliveries(subscription_id TEXT NOT NULL, occurrence_id TEXT NOT NULL,
-          delivery_id TEXT NOT NULL, accepted_at TEXT NOT NULL, PRIMARY KEY(subscription_id,occurrence_id));
-        CREATE TABLE IF NOT EXISTS idempotency_keys(key TEXT PRIMARY KEY, operation TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS dead_letters(subscription_id TEXT NOT NULL, occurrence_id TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(subscription_id,occurrence_id));""")
+        migration=Path(__file__).parents[1]/"migrations/001_initial.sql"
+        self.db.executescript(migration.read_text(encoding="utf-8"))
         self.db.execute("INSERT OR IGNORE INTO migrations(version) VALUES(1)")
         self.db.commit()
     def close(self):
