@@ -1,0 +1,11 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "name": "enotify",
+  "root": "packages/enotify",
+  "targets": {
+    "test": { "command": "PYTHONPATH=packages/enotify python3 -m unittest discover -s packages/enotify/tests -p 'test_*.py'" },
+    "lint": { "command": "python3 -m compileall -q packages/enotify" },
+    "deploy": { "command": "python3 packages/enotify/deploy.py install" },
+    "undeploy": { "command": "python3 packages/enotify/deploy.py uninstall" }
+  }
+}
