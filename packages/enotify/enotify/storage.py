@@ -36,7 +36,7 @@ class Store:
         self.db.commit(); return self.get(sid)
     def redact(self, value):
         if isinstance(value, dict):
-            return {k: ("[redacted]" if any(x in k.lower() for x in ("secret","token","key","password")) else self.redact(v)) for k,v in value.items()}
+            return {k: ("[redacted]" if k.lower() in ("secret","token","password","secret_value") else self.redact(v)) for k,v in value.items()}
         if isinstance(value, list): return [self.redact(v) for v in value]
         return value
     def mutate_idempotent(self, key, operation, action):
@@ -75,6 +75,13 @@ class Store:
         if sub["frequency"]=="one":
             reservation=self.db.execute("SELECT state,revision FROM one_reservations WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)).fetchone()
             if not reservation or reservation["state"]!="reserved" or reservation["revision"]!=revision: self.db.rollback(); return False
+        accepted=self.db.execute("SELECT 1 FROM accepted_deliveries WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)).fetchone()
+        if accepted: self.db.rollback(); return False
+        existing=self.db.execute("SELECT revision,state FROM delivery_claims WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)).fetchone()
+        if existing and existing["state"] not in ("retryable","expired"): self.db.rollback(); return False
+        lease=self.db.execute("SELECT expires_at FROM leases WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)).fetchone()
+        if lease and float(lease["expires_at"]) > datetime.now(timezone.utc).timestamp(): self.db.rollback(); return False
+        self.db.execute("INSERT OR REPLACE INTO delivery_claims VALUES(?,?,?,?,?)",(sid,occurrence_id,revision,"sending",now()))
         self.db.execute("INSERT OR REPLACE INTO leases VALUES(?,?,?,?)",(sid,occurrence_id,revision,datetime.now(timezone.utc).timestamp()+ttl_seconds))
         self.db.execute("INSERT OR IGNORE INTO notification_attempts VALUES(?,?,?,?,?,?,?)",(sid,occurrence_id,attempt,f"{sid}/{occurrence_id}","started",None,now()))
         self.db.commit(); return True
@@ -82,13 +89,18 @@ class Store:
         return self.db.execute("SELECT 1 FROM accepted_deliveries WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)).fetchone() is not None
     def reclaim_expired(self):
         now_epoch=datetime.now(timezone.utc).timestamp()
+        expired=[tuple(r) for r in self.db.execute("SELECT subscription_id,occurrence_id FROM leases WHERE expires_at<=?",(now_epoch,))]
+        for sid,oid in expired: self.db.execute("UPDATE delivery_claims SET state='expired' WHERE subscription_id=? AND occurrence_id=? AND state='sending'",(sid,oid))
         cur=self.db.execute("DELETE FROM leases WHERE expires_at<=?",(now_epoch,)); self.db.commit(); return cur.rowcount
-    def accepted(self,sid,occurrence_id,delivery_id):
+    def accepted(self,sid,occurrence_id,delivery_id,revision):
         self.db.execute("BEGIN IMMEDIATE")
         row=self.db.execute("SELECT * FROM subscriptions WHERE id=?",(sid,)).fetchone()
         occurrence=self.db.execute("SELECT 1 FROM occurrences WHERE id=?",(occurrence_id,)).fetchone()
         attempt=self.db.execute("SELECT 1 FROM notification_attempts WHERE subscription_id=? AND occurrence_id=? AND outcome='started'",(sid,occurrence_id)).fetchone()
-        if not row or not occurrence or not attempt: self.db.rollback(); raise Conflict("accepted delivery lacks observed occurrence and started attempt")
+        claim=self.db.execute("SELECT state,revision FROM delivery_claims WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)).fetchone()
+        if not row or not occurrence or not attempt or not claim: self.db.rollback(); raise Conflict("accepted delivery lacks observed occurrence, claim, and started attempt")
+        if row["state"]!="active" or row["revision"]!=revision or claim["state"]!="sending" or claim["revision"]!=revision:
+            self.db.rollback(); raise Conflict("subscription changed during delivery")
         if row["frequency"]=="one":
             reservation=self.db.execute("SELECT * FROM one_reservations WHERE subscription_id=? AND occurrence_id=? AND state='reserved' AND revision=?",(sid,occurrence_id,row["revision"])).fetchone()
             if not reservation: self.db.rollback(); raise Conflict("accepted delivery lacks current reservation")
@@ -97,6 +109,17 @@ class Store:
             cur=self.db.execute("UPDATE subscriptions SET state='finished',revision=revision+1,updated_at=? WHERE id=? AND state='active' AND revision=?",(now(),sid,row["revision"]))
             if cur.rowcount!=1: self.db.rollback(); raise Conflict("subscription revision changed")
         self.db.execute("UPDATE one_reservations SET state='accepted' WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)); self.db.commit()
+        self.db.execute("UPDATE delivery_claims SET state='accepted' WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id))
+        self.db.execute("DELETE FROM leases WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)); self.db.commit()
+    def failed_attempt(self,sid,occurrence_id,attempt,error,max_attempts=3):
+        self.db.execute("UPDATE notification_attempts SET outcome='retryable',error=? WHERE subscription_id=? AND occurrence_id=? AND attempt=?",(error,sid,occurrence_id,attempt))
+        self.db.execute("UPDATE delivery_claims SET state='retryable' WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id))
+        self.db.execute("DELETE FROM leases WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)); self.db.commit()
+        if attempt >= max_attempts:
+            row=self.get(sid)
+            if row["frequency"]=="one": self.exhaust_one(sid,occurrence_id)
+            return False
+        return True
     def exhaust_one(self,sid,occurrence_id,reason="delivery_exhausted"):
         row=self.get(sid)
         cur=self.db.execute("UPDATE subscriptions SET state='paused',revision=revision+1,reason=?,updated_at=? WHERE id=? AND state='active'",(reason,now(),sid))

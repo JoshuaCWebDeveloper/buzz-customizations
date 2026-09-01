@@ -7,18 +7,23 @@ class Worker:
             self.store.record_occurrence(occurrence)
             if self.store.accepted_for(subscription["id"],occurrence.occurrence_id): continue
             if subscription["frequency"]=="one" and not self.store.reserve_one(subscription["id"],occurrence.occurrence_id): continue
-            current=self.store.get(subscription["id"])
-            if not self.store.claim(subscription["id"],occurrence.occurrence_id,current["revision"],1): continue
+            current=self.store.get(subscription["id"]); revision=current["revision"]
+            if not self.store.claim(subscription["id"],occurrence.occurrence_id,revision,1): continue
             try: delivery=self.notification_provider.send(render(occurrence),f'{subscription["id"]}/{occurrence.occurrence_id}')
             except Exception as exc:
-                self.store.record_attempt(subscription["id"],occurrence.occurrence_id,1,"retryable",str(exc)[:500]); continue
-            self.store.accepted(subscription["id"],occurrence.occurrence_id,delivery.delivery_id)
+                self.store.failed_attempt(subscription["id"],occurrence.occurrence_id,1,str(exc)[:500]); continue
+            if delivery.outcome != "accepted":
+                self.store.failed_attempt(subscription["id"],occurrence.occurrence_id,1,(delivery.error or delivery.outcome)[:500]); continue
+            self.store.accepted(subscription["id"],occurrence.occurrence_id,delivery.receipt,revision)
     def retry(self, subscription, occurrence_id, render, attempt=2):
         current=self.store.get(subscription["id"])
-        if not self.store.claim(subscription["id"],occurrence_id,current["revision"],attempt): return False
+        revision=current["revision"]
+        if not self.store.claim(subscription["id"],occurrence_id,revision,attempt): return False
         occurrence=self.store.db.execute("SELECT * FROM occurrences WHERE id=?",(occurrence_id,)).fetchone()
         try:
             delivery=self.notification_provider.send(render(occurrence),f'{subscription["id"]}/{occurrence_id}')
         except Exception as exc:
-            self.store.record_attempt(subscription["id"],occurrence_id,attempt,"retryable",str(exc)[:500]); return False
-        self.store.accepted(subscription["id"],occurrence_id,delivery.delivery_id); return True
+            self.store.failed_attempt(subscription["id"],occurrence_id,attempt,str(exc)[:500]); return False
+        if delivery.outcome != "accepted":
+            self.store.failed_attempt(subscription["id"],occurrence_id,attempt,(delivery.error or delivery.outcome)[:500]); return False
+        self.store.accepted(subscription["id"],occurrence_id,delivery.receipt,revision); return True

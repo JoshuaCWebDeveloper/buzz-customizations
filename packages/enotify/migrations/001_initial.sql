@@ -15,3 +15,6 @@ CREATE TABLE IF NOT EXISTS accepted_deliveries(subscription_id TEXT NOT NULL, oc
 CREATE TABLE IF NOT EXISTS idempotency_keys(key TEXT PRIMARY KEY, operation TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS dead_letters(subscription_id TEXT NOT NULL, occurrence_id TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(subscription_id,occurrence_id));
 CREATE TABLE IF NOT EXISTS leases(subscription_id TEXT NOT NULL, occurrence_id TEXT NOT NULL, revision INTEGER NOT NULL, expires_at TEXT NOT NULL, PRIMARY KEY(subscription_id,occurrence_id));
+CREATE TABLE IF NOT EXISTS delivery_claims(subscription_id TEXT NOT NULL, occurrence_id TEXT NOT NULL,
+ revision INTEGER NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL,
+ PRIMARY KEY(subscription_id,occurrence_id));

@@ -6,6 +6,7 @@ from enotify.models import EventTriggerSpec, NotificationAddressSpec
 from enotify.providers.events import default_registry as event_registry
 from enotify.providers.notifications import default_registry as notification_registry
 from enotify.storage import Store, Conflict
+from enotify.worker import Worker
 
 def main(argv=None):
     parser=argparse.ArgumentParser(prog="enotify"); parser.add_argument("--db",default=os.environ.get("ENOTIFY_DB",str(Path.home()/".local/state/enotify/enotify.db")))
@@ -32,7 +33,11 @@ def main(argv=None):
         elif a.action in ("get","status"): item=store.get(a.id)
         elif a.action=="deliveries": item=store.deliveries(a.id)
         elif a.action=="release": item=store.release_one(a.id, a.occurrence)
-        elif a.action=="retry": item=store.record_attempt(a.id,a.occurrence,a.attempt,"retry_requested")
+        elif a.action=="retry":
+            subscription=store.get(a.id); address=subscription["notification_address"]
+            notification=notification_registry().get(address["provider"],address["notification_type"])
+            trigger=subscription["event_trigger"]; events=event_registry().get(trigger["provider"],trigger["event_type"])
+            item=Worker(store,events,notification).retry(subscription,a.occurrence,lambda occurrence: json.dumps(dict(occurrence),sort_keys=True),a.attempt)
         elif a.action in ("pause","resume","delete"): item=store.transition(a.id,a.action,a.if_revision)
         elif a.action=="update":
             old=store.get(a.id)

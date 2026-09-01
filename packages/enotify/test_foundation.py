@@ -6,7 +6,7 @@ from enotify.providers.notifications import default_registry as notifications
 from enotify.storage import Store, Conflict
 from enotify.worker import Worker
 from enotify.providers.events import EventOccurrence
-from enotify.providers.notifications import AcceptedDelivery
+from enotify.providers.notifications import SendResult
 
 class FoundationTests(unittest.TestCase):
     def specs(self):
@@ -22,14 +22,15 @@ class FoundationTests(unittest.TestCase):
     def test_provider_schema_fixtures_reject_unknown_fields(self):
         registry=default_registry()
         self.assertEqual(registry.get("buzz","channel-events").validate_config({"community":"com","channel":"c","author":"a","kind":20002},1)["channel"],"c")
-        self.assertEqual(registry.get("github","check").validate_config({"repository":"r","check":{"name":"ci"},"pull_request":{"number":42}},1)["pull_request"]["number"],42)
+        self.assertEqual(registry.get("github","check").validate_config({"repository":"owner/repo","check":{"name":{"equals":"ci"}},"pull_request":{"number":42}},1)["pull_request"]["number"],42)
         self.assertEqual(registry.get("system-process","exited").validate_config({"pid":7,"start_identity":"s"},1)["pid"],7)
         for provider, event_type in (("buzz","channel-events"),("github","check"),("system-process","exited")):
             with self.assertRaises(ValueError): registry.get(provider,event_type).validate_config({"unexpected":True},1)
     def test_buzz_notification_address_fixture(self):
         provider=notifications().get("buzz","message")
         self.assertEqual(provider.validate_config({"community":"community","channel":"channel"},1)["channel"],"channel")
-        self.assertEqual(provider.validate_config({"community":"community","channel":"channel","mention":"Alice"},1)["mention"],"Alice")
+        mention={"pubkey":"abc","handle":"Alice"}
+        self.assertEqual(provider.validate_config({"community":"community","channel":"channel","mention":mention},1)["mention"],mention)
         with self.assertRaises(ValueError): provider.validate_config({"community":"c"},1)
         with self.assertRaises(ValueError): provider.validate_config({"community":"c","channel":"ch","secret":"x"},1)
     def test_crud_revision_reservation_and_acceptance(self):
@@ -37,14 +38,14 @@ class FoundationTests(unittest.TestCase):
             s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); item=s.create("one",e,n)
             self.assertTrue(s.reserve_one(item["id"],"occ-1")); self.assertFalse(s.reserve_one(item["id"],"occ-2"))
             with self.assertRaises(Conflict): s.transition(item["id"],"pause",99)
-            s.record_occurrence(EventOccurrence("occ-1","fake","now")); self.assertTrue(s.claim(item["id"],"occ-1",item["revision"],1))
-            s.accepted(item["id"],"occ-1","delivery-1"); self.assertEqual(s.get(item["id"])["state"],"finished"); s.close()
+            s.record_occurrence(EventOccurrence("fake","fake","occ-1","now")); self.assertTrue(s.claim(item["id"],"occ-1",item["revision"],1))
+            s.accepted(item["id"],"occ-1","delivery-1",item["revision"]); self.assertEqual(s.get(item["id"])["state"],"finished"); s.close()
     def test_failed_attempt_does_not_consume_one_and_all_continues(self):
         with tempfile.TemporaryDirectory() as d:
             s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs()
             one=s.create("one",e,n); self.assertTrue(s.reserve_one(one["id"],"failed")); s.record_attempt(one["id"],"failed",1,"retryable","timeout")
             self.assertEqual(s.get(one["id"])["state"],"active"); self.assertFalse(s.reserve_one(one["id"],"later"))
-            all_sub=s.create("all",e,n); s.record_occurrence(EventOccurrence("a","fake","now")); self.assertTrue(s.claim(all_sub["id"],"a",all_sub["revision"],1)); s.accepted(all_sub["id"],"a","d-a"); self.assertEqual(s.get(all_sub["id"])["state"],"active"); s.close()
+            all_sub=s.create("all",e,n); s.record_occurrence(EventOccurrence("fake","fake","a","now")); self.assertTrue(s.claim(all_sub["id"],"a",all_sub["revision"],1)); s.accepted(all_sub["id"],"a","d-a",all_sub["revision"]); self.assertEqual(s.get(all_sub["id"])["state"],"active"); s.close()
     def test_exhaustion_fails_closed_and_redacts_idempotent_result(self):
         with tempfile.TemporaryDirectory() as d:
             s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); item=s.create("one",e,n)
@@ -57,13 +58,38 @@ class FoundationTests(unittest.TestCase):
             s.close()
     def test_fake_worker_one_and_all_flows(self):
         class Events:
-            def observe(self, cursor): return [EventOccurrence("o1","fake","now"),EventOccurrence("o2","fake","now")]
+            def observe(self, cursor): return [EventOccurrence("fake","fake","o1","now"),EventOccurrence("fake","fake","o2","now")]
         class Notifications:
             def __init__(self): self.sent=[]
-            def send(self, message, key): self.sent.append(key); return AcceptedDelivery("d-"+key[-2:])
+            def send(self, message, key): self.sent.append(key); return SendResult.accepted("d-"+key[-2:])
         with tempfile.TemporaryDirectory() as d:
             s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); p=Notifications()
             one=s.create("one",e,n); Worker(s,Events(),p).process(one,lambda o:"message")
             self.assertEqual(len(p.sent),1); self.assertEqual(s.get(one["id"])["state"],"finished")
             all_sub=s.create("all",e,n); Worker(s,Events(),p).process(all_sub,lambda o:"message")
             self.assertEqual(len(p.sent),3); self.assertEqual(s.get(all_sub["id"])["state"],"active"); s.close()
+    def test_inflight_mutation_fences_acceptance_and_restart_deduplicates_all(self):
+        class Events:
+            def observe(self, cursor): return [EventOccurrence("fake","fake","o1","now")]
+        class Notifications:
+            def __init__(self, store, sid): self.store,self.sid,self.sent=store,sid,0
+            def send(self, message, key):
+                self.sent+=1; self.store.transition(self.sid,"pause"); return SendResult.accepted("delivery")
+        with tempfile.TemporaryDirectory() as d:
+            s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); sub=s.create("all",e,n); provider=Notifications(s,sub["id"])
+            with self.assertRaises(Conflict): Worker(s,Events(),provider).process(sub,lambda o:"message")
+            self.assertEqual(s.get(sub["id"])["state"],"paused")
+            s.transition(sub["id"],"resume"); current=s.get(sub["id"]); s.record_occurrence(EventOccurrence("fake","fake","accepted","now"))
+            self.assertTrue(s.claim(current["id"],"accepted",current["revision"],1)); s.accepted(current["id"],"accepted","d",current["revision"])
+            class AcceptedEvents:
+                def observe(self, cursor): return [EventOccurrence("fake","fake","accepted","now")]
+            Worker(s,AcceptedEvents(),provider).process(s.get(sub["id"]),lambda o:"message")
+            self.assertEqual(provider.sent,1); s.close()
+    def test_retry_exhaustion_release_resume_and_lease_reclaim(self):
+        with tempfile.TemporaryDirectory() as d:
+            s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); sub=s.create("one",e,n)
+            s.record_occurrence(EventOccurrence("fake","fake","o","now")); self.assertTrue(s.reserve_one(sub["id"],"o"))
+            self.assertTrue(s.claim(sub["id"],"o",sub["revision"],3,ttl_seconds=-1)); self.assertEqual(s.reclaim_expired(),1)
+            self.assertTrue(s.claim(sub["id"],"o",sub["revision"],3)); self.assertFalse(s.failed_attempt(sub["id"],"o",3,"failed",3))
+            self.assertEqual(s.get(sub["id"])["state"],"paused"); self.assertTrue(s.release_one(sub["id"],"o"))
+            self.assertEqual(s.get(sub["id"])["state"],"active"); s.close()
