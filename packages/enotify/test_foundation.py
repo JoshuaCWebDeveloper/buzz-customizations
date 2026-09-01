@@ -16,6 +16,19 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(notifications().get("buzz","message").role,"notification")
         with self.assertRaises(KeyError): default_registry().get("github","missing")
         with self.assertRaises(KeyError): notifications().get("buzz","missing")
+    def test_provider_schema_fixtures_reject_unknown_fields(self):
+        registry=default_registry()
+        self.assertEqual(registry.get("buzz","channel").validate_config({"channel":"c","author":"a","kinds":[1]},1)["channel"],"c")
+        self.assertEqual(registry.get("github","check").validate_config({"repository":"r","pull_request":42},1)["pull_request"],42)
+        self.assertEqual(registry.get("system-process","exited").validate_config({"pid":7,"start_identity":"s"},1)["pid"],7)
+        for provider, event_type in (("buzz","channel"),("github","check"),("system-process","exited")):
+            with self.assertRaises(ValueError): registry.get(provider,event_type).validate_config({"unexpected":True},1)
+    def test_buzz_notification_address_fixture(self):
+        provider=notifications().get("buzz","message")
+        self.assertEqual(provider.validate_config({"community":"community","channel":"channel"},1)["channel"],"channel")
+        self.assertEqual(provider.validate_config({"community":"community","channel":"channel","mention":"Alice"},1)["mention"],"Alice")
+        with self.assertRaises(ValueError): provider.validate_config({"community":"c"},1)
+        with self.assertRaises(ValueError): provider.validate_config({"community":"c","channel":"ch","secret":"x"},1)
     def test_crud_revision_reservation_and_acceptance(self):
         with tempfile.TemporaryDirectory() as d:
             s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); item=s.create("one",e,n)
