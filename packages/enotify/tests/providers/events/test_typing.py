@@ -1,5 +1,7 @@
 import json
+import os
 import unittest
+from unittest.mock import patch
 
 from enotify.providers.events.typing import BuzzTypingTransitionsProvider
 
@@ -10,12 +12,12 @@ def tick(event_id, at, author="author", channel="channel"):
 
 
 class TypingProviderTests(unittest.TestCase):
-    def provider(self, rows, now=100):
+    def provider(self, rows, now=100, community_output=None):
         class Result:
             stdout = json.dumps(rows)
         def run(command, **kwargs):
             result = Result()
-            result.stdout = json.dumps({"community": "community"}) if "channels" in command else json.dumps(rows)
+            result.stdout = json.dumps(community_output if community_output is not None else {"community": "community"}) if "channels" in command else json.dumps(rows)
             return result
         return BuzzTypingTransitionsProvider(
             run,
@@ -50,6 +52,28 @@ class TypingProviderTests(unittest.TestCase):
         second = self.provider([])
         second.config["ttl"] = 9
         self.assertNotEqual(first.source, second.source)
+
+    def test_community_identity_from_explicit_cli_field(self):
+        provider = self.provider([], community_output={"community": "community"})
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(provider.observe_ticks(), [])
+
+    def test_community_identity_falls_back_to_environment(self):
+        provider = self.provider([], community_output={})
+        with patch.dict(os.environ, {"BUZZ_COMMUNITY_ID": "community"}, clear=True):
+            self.assertEqual(provider.observe_ticks(), [])
+
+    def test_community_identity_requires_cli_or_environment(self):
+        provider = self.provider([], community_output={})
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "BUZZ_COMMUNITY_ID is required"):
+                provider.observe_ticks()
+
+    def test_community_identity_rejects_mismatch(self):
+        provider = self.provider([], community_output={"community": "other"})
+        with patch.dict(os.environ, {"BUZZ_COMMUNITY_ID": "community"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "does not match configured community"):
+                provider.observe_ticks()
 
 
 if __name__ == "__main__":
