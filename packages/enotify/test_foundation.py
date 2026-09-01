@@ -4,6 +4,9 @@ from enotify.models import EventTriggerSpec, NotificationAddressSpec, canonical_
 from enotify.providers.events import default_registry
 from enotify.providers.notifications import default_registry as notifications
 from enotify.storage import Store, Conflict
+from enotify.worker import Worker
+from enotify.providers.events import EventOccurrence
+from enotify.providers.notifications import AcceptedDelivery
 
 class FoundationTests(unittest.TestCase):
     def specs(self):
@@ -48,6 +51,18 @@ class FoundationTests(unittest.TestCase):
             result=s.exhaust_one(item["id"],"occ"); self.assertEqual(result["state"],"paused")
             self.assertTrue(s.release_one(item["id"],"occ")); self.assertFalse(s.release_one(item["id"],"occ"))
             value=s.mutate_idempotent("k","update",lambda: {"token":"secret","ok":True})
-            self.assertEqual(value["token"],"secret")
+            self.assertEqual(value["token"],"[redacted]")
             self.assertEqual(s.mutate_idempotent("k","update",lambda: {"token":"changed"})["token"],"[redacted]")
             s.close()
+    def test_fake_worker_one_and_all_flows(self):
+        class Events:
+            def observe(self, cursor): return [EventOccurrence("o1","fake","now"),EventOccurrence("o2","fake","now")]
+        class Notifications:
+            def __init__(self): self.sent=[]
+            def send(self, message, key): self.sent.append(key); return AcceptedDelivery("d-"+key[-2:])
+        with tempfile.TemporaryDirectory() as d:
+            s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); p=Notifications()
+            one=s.create("one",e,n); Worker(s,Events(),p).process(one,lambda o:"message")
+            self.assertEqual(len(p.sent),1); self.assertEqual(s.get(one["id"])["state"],"finished")
+            all_sub=s.create("all",e,n); Worker(s,Events(),p).process(all_sub,lambda o:"message")
+            self.assertEqual(len(p.sent),3); self.assertEqual(s.get(all_sub["id"])["state"],"active"); s.close()

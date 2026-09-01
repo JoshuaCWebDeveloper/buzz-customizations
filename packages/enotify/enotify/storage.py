@@ -42,10 +42,11 @@ class Store:
     def mutate_idempotent(self, key, operation, action):
         row=self.db.execute("SELECT result_json FROM idempotency_keys WHERE key=?",(key,)).fetchone()
         if row: return json.loads(row[0])
-        result=action(); self.db.execute("INSERT INTO idempotency_keys VALUES(?,?,?,?)",(key,operation,json.dumps(self.redact(result),sort_keys=True),now())); self.db.commit(); return result
+        result=self.redact(action()); encoded=json.dumps(result,sort_keys=True)
+        self.db.execute("INSERT INTO idempotency_keys VALUES(?,?,?,?)",(key,operation,encoded,now())); self.db.commit(); return json.loads(encoded)
     def _row(self,row):
         if not row: raise KeyError("subscription not found")
-        return {"id":row["id"],"revision":row["revision"],"frequency":row["frequency"],"event_trigger":json.loads(row["event_json"]),"notification_address":json.loads(row["notification_json"]),"state":row["state"],"reason":row["reason"],"created_at":row["created_at"],"updated_at":row["updated_at"]}
+        return self.redact({"id":row["id"],"revision":row["revision"],"frequency":row["frequency"],"event_trigger":json.loads(row["event_json"]),"notification_address":json.loads(row["notification_json"]),"state":row["state"],"reason":row["reason"],"created_at":row["created_at"],"updated_at":row["updated_at"]})
     def get(self,sid): return self._row(self.db.execute("SELECT * FROM subscriptions WHERE id=?",(sid,)).fetchone())
     def list(self): return [self._row(r) for r in self.db.execute("SELECT * FROM subscriptions ORDER BY created_at")]
     def transition(self,sid,action,expected=None):
@@ -77,3 +78,6 @@ class Store:
         self.get(sid); cur=self.db.execute("UPDATE one_reservations SET state='released' WHERE subscription_id=? AND occurrence_id=? AND state='reserved'",(sid,occurrence_id))
         if cur.rowcount!=1: return False
         self.db.commit(); return True
+    def deliveries(self,sid,limit=100):
+        self.get(sid)
+        return [dict(r) for r in self.db.execute("SELECT * FROM notification_attempts WHERE subscription_id=? ORDER BY created_at DESC LIMIT ?",(sid,limit))]

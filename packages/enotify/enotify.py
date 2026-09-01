@@ -12,8 +12,10 @@ def main(argv=None):
     sub=parser.add_subparsers(dest="command",required=True); p=sub.add_parser("provider"); p.add_argument("action",choices=("list",))
     s=sub.add_parser("subscription"); ss=s.add_subparsers(dest="action",required=True)
     c=ss.add_parser("create"); c.add_argument("--frequency",required=True); c.add_argument("--event",required=True); c.add_argument("--notification",required=True)
-    for action in ("list","get","pause","resume","delete","status"):
+    for action in ("list","get","pause","resume","delete","status","deliveries","retry","release"):
         q=ss.add_parser(action); q.add_argument("id",nargs="?"); q.add_argument("--if-revision",type=int)
+        if action in ("deliveries","retry","release"): q.add_argument("--occurrence",required=True)
+        if action=="retry": q.add_argument("--attempt",type=int,default=1)
     u=ss.add_parser("update"); u.add_argument("id"); u.add_argument("--frequency"); u.add_argument("--event"); u.add_argument("--notification"); u.add_argument("--if-revision",type=int)
     a=parser.parse_args(argv)
     if a.command=="provider": print(json.dumps({"events":event_registry().describe(),"notifications":notification_registry().describe()},sort_keys=True)); return 0
@@ -28,6 +30,9 @@ def main(argv=None):
             item=store.create(a.frequency,EventTriggerSpec(e["provider"],e["event_type"],e["schema_version"],match),NotificationAddressSpec(n["provider"],n["notification_type"],n["schema_version"],address))
         elif a.action=="list": item=store.list()
         elif a.action in ("get","status"): item=store.get(a.id)
+        elif a.action=="deliveries": item=store.deliveries(a.id)
+        elif a.action=="release": item=store.release_one(a.id, a.occurrence)
+        elif a.action=="retry": item=store.record_attempt(a.id,a.occurrence,a.attempt,"retry_requested")
         elif a.action in ("pause","resume","delete"): item=store.transition(a.id,a.action,a.if_revision)
         elif a.action=="update":
             old=store.get(a.id)
