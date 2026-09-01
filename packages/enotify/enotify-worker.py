@@ -11,7 +11,7 @@ from pathlib import Path
 
 from enotify.models import EventTriggerSpec, NotificationAddressSpec
 from enotify.providers.events.registry import default_registry as event_registry
-from enotify.providers.events.typing import close_typing_streams, prune_typing_streams, wait_for_typing_activity
+from enotify.providers.events.typing import close_typing_streams, prune_typing_streams, typing_stream_health, wait_for_typing_activity, wake_typing_streams
 from enotify.providers.notifications.registry import default_registry as notification_registry
 from enotify.storage import Store
 from enotify.worker import Worker
@@ -23,6 +23,7 @@ stopping = False
 def stop(_signum, _frame):
     global stopping
     stopping = True
+    wake_typing_streams()
 
 
 def main() -> int:
@@ -52,6 +53,9 @@ def main() -> int:
                 except Exception as exc:
                     print(f"enotify provider unavailable: {type(exc).__name__}", file=sys.stderr)
             prune_typing_streams(active_streams)
+            for health in typing_stream_health():
+                if health.get("error"):
+                    print(f"enotify typing stream status: {health['error']}", file=sys.stderr)
             due = store.typing_due()
             timeout = interval if due is None else max(0, min(interval, due - int(time.time())))
             # A live typing reader wakes the scheduler as soon as a tick

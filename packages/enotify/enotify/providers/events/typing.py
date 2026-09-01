@@ -143,10 +143,12 @@ class BuzzTypingLiveStream:
 
     def __init__(self, community: str, channel: str, author: str,
                  popen_factory: Callable[..., Any] | None = None,
-                 clock: Callable[[], float] | None = None):
+                 clock: Callable[[], float] | None = None,
+                 wake: Callable[[], Any] | None = None):
         self.community, self.channel, self.author = community, channel, author
         self._popen = popen_factory or subprocess.Popen
         self._clock = clock or time.monotonic
+        self._wake_callback = wake or (lambda: None)
         self._child: Any = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -156,6 +158,7 @@ class BuzzTypingLiveStream:
         self._backoff = 1.0
         self._ready = False
         self._reconnect_requested = threading.Event()
+        self._last_error: str | None = None
         self._thread = threading.Thread(target=self._supervise, name="buzz-typing-stream", daemon=True)
         self._thread.start()
 
@@ -190,13 +193,16 @@ class BuzzTypingLiveStream:
             except Exception:
                 # Keep transport details bounded and out of notifications; the
                 # service remains healthy and the next retry is scheduled.
-                pass
+                self._last_error = "spawn-or-read-failure"
             finally:
                 self._close_child(child)
             with self._lock:
                 self._ready = False
+                if child is not None and getattr(child, "returncode", None) not in (None, 0):
+                    self._last_error = "stream-exit"
                 self._backoff_until = self._clock() + self._backoff
                 self._backoff = min(self._backoff * 2, 30.0)
+            self._wake_callback()
 
     def _consume(self, line: str) -> None:
         try:
@@ -211,16 +217,21 @@ class BuzzTypingLiveStream:
                 self._ready = True
                 self._backoff = 1.0
             self._wake.set()
+            self._wake_callback()
             return
         if kind in ("closed", "error"):
             # Closing the stdout pipe causes the supervisor to reconnect.
+            with self._lock:
+                self._last_error = "closed-control" if kind == "closed" else "error-control"
             self._reconnect_requested.set()
+            self._wake_callback()
             return
         if kind != "event" or not isinstance(value.get("event"), dict):
             return
         with self._lock:
             self._backlog.append(value["event"])
         self._wake.set()
+        self._wake_callback()
 
     def poll(self) -> list[dict[str, Any]]:
         # The reader owns the blocking pipe read; this short handoff only
@@ -258,6 +269,10 @@ class BuzzTypingLiveStream:
         if signaled:
             self._wake.clear()
         return signaled
+
+    def health(self) -> dict[str, Any]:
+        with self._lock:
+            return {"ready": self._ready, "error": self._last_error, "backoff_until": self._backoff_until}
 
     def close(self) -> None:
         self._stop.set()
@@ -298,8 +313,10 @@ class _RunnerTypingLiveStream:
 
 
 class _TypingStreamPool:
-    def __init__(self):
+    def __init__(self, stream_factory: Callable[..., BuzzTypingLiveStream] | None = None):
         self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stream_factory = stream_factory or BuzzTypingLiveStream
         self._streams: dict[tuple[str, str, str], BuzzTypingLiveStream] = {}
 
     def stream(self, community: str, channel: str, author: str) -> BuzzTypingLiveStream:
@@ -307,8 +324,9 @@ class _TypingStreamPool:
         with self._lock:
             stream = self._streams.get(key)
             if stream is None:
-                stream = BuzzTypingLiveStream(*key)
+                stream = self._stream_factory(*key, wake=self._wake.set)
                 self._streams[key] = stream
+            self._wake.set()
             return stream
 
     def prune(self, active: set[tuple[str, str, str]]) -> None:
@@ -317,19 +335,18 @@ class _TypingStreamPool:
             streams = [self._streams.pop(key) for key in retired]
         for stream in streams:
             stream.close()
+        self._wake.set()
 
     def wait(self, timeout: float) -> bool:
+        signaled = self._wake.wait(max(0.0, timeout))
+        if signaled:
+            self._wake.clear()
+        return signaled
+
+    def health(self) -> list[dict[str, Any]]:
         with self._lock:
-            streams = list(self._streams.values())
-        if not streams:
-            time.sleep(max(0.0, timeout))
-            return False
-        end = time.monotonic() + max(0.0, timeout)
-        while time.monotonic() < end:
-            for stream in streams:
-                if stream.wait(min(0.25, max(0.0, end - time.monotonic()))):
-                    return True
-        return False
+            items = list(self._streams.items())
+        return [{"source": key, **stream.health()} for key, stream in items]
 
     def close_all(self) -> None:
         with self._lock:
@@ -352,6 +369,15 @@ def prune_typing_streams(active: set[tuple[str, str, str]]) -> None:
 def wait_for_typing_activity(timeout: float) -> bool:
     """Wait for any shared reader without polling or blocking a child read."""
     return _stream_pool.wait(timeout)
+
+
+def wake_typing_streams() -> None:
+    """Wake the service scheduler for signal-driven shutdown."""
+    _stream_pool._wake.set()
+
+
+def typing_stream_health() -> list[dict[str, Any]]:
+    return _stream_pool.health()
 
 
 _stream_pool = _TypingStreamPool()

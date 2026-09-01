@@ -4,7 +4,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-from enotify.providers.events.typing import BuzzTypingLiveStream, BuzzTypingTransitionsProvider
+from enotify.providers.events.typing import (
+    BuzzTypingLiveStream,
+    BuzzTypingTransitionsProvider,
+    _TypingStreamPool,
+)
 
 
 def tick(event_id, at, author="author", channel="channel"):
@@ -128,21 +132,141 @@ class TypingProviderTests(unittest.TestCase):
             return child
 
         stream = BuzzTypingLiveStream("community", "channel", "author", popen_factory=popen)
-        os.write(write_fd, b'{"type":"notice","message":"ignored"}\n')
-        os.write(write_fd, b'not json\n')
-        os.write(write_fd, (json.dumps({"type": "event", "event": tick("live", 100)}) + "\n").encode())
+        for _ in range(100):
+            if children:
+                break
+            time.sleep(0.01)
+        self.assertEqual(len(children), 1)
+        os.write(write_fd, b'{"type":"notice","message":"ignored"}\nnot json\n')
+        event_line = (json.dumps({"type": "event", "event": tick("live", 100)}) + "\n").encode()
+        os.write(write_fd, event_line[:12])
+        os.write(write_fd, event_line[12:])
         self.assertEqual(stream.poll(), [])
         os.write(write_fd, b'{"type":"eose"}\n')
         rows = []
-        for _ in range(20):
+        for _ in range(100):
             rows = stream.poll()
-            if rows:
+            if rows and stream._ready:
                 break
             time.sleep(0.01)
         self.assertEqual([row["id"] for row in rows], ["live"])
         os.close(write_fd)
         stream.close()
         self.assertTrue(children[0][1].terminated)
+
+    def test_eof_reconnects_after_backoff_and_requires_new_eose(self):
+        children, writers = [], []
+
+        class Child:
+            def __init__(self, reader):
+                self.stdout, self.terminated = reader, False
+            def terminate(self):
+                self.terminated = True
+            def wait(self, timeout=None):
+                return 0
+            def kill(self):
+                self.terminated = True
+
+        def popen(command, **kwargs):
+            read_fd, write_fd = os.pipe()
+            reader = os.fdopen(read_fd, "r")
+            writers.append(write_fd)
+            child = Child(reader)
+            children.append(child)
+            return child
+
+        stream = BuzzTypingLiveStream("c", "ch", "a", popen_factory=popen)
+        for _ in range(20):
+            if writers:
+                break
+            time.sleep(0.01)
+        self.assertEqual(len(writers), 1)
+        os.write(writers[0], (json.dumps({"type": "eose"}) + "\n").encode())
+        for _ in range(20):
+            if stream.poll() == [] and stream._ready:
+                break
+            time.sleep(0.01)
+        os.close(writers[0])
+        for _ in range(160):
+            if len(children) >= 2:
+                break
+            time.sleep(0.01)
+        self.assertEqual(len(children), 2)
+        self.assertFalse(stream._ready)
+        os.write(writers[1], (json.dumps({"type": "eose"}) + "\n").encode())
+        for _ in range(20):
+            if stream._ready:
+                break
+            time.sleep(0.01)
+        self.assertTrue(stream._ready)
+        os.close(writers[1])
+        stream.close()
+        self.assertTrue(all(child.terminated for child in children))
+
+    def test_pool_prunes_orphans_closes_all_and_wakes(self):
+        class Managed:
+            def __init__(self, signaled=False):
+                self.closed = False
+                self.signaled = signaled
+            def close(self):
+                self.closed = True
+            def wait(self, timeout):
+                return self.signaled
+
+        pool = _TypingStreamPool()
+        retained = Managed()
+        orphan = Managed()
+        pool._streams = {("c", "ch", "a"): retained, ("c", "old", "a"): orphan}
+        pool.prune({("c", "ch", "a")})
+        self.assertFalse(retained.closed)
+        self.assertTrue(orphan.closed)
+        wake = Managed(signaled=True)
+        pool._streams[("c", "other", "a")] = wake
+        self.assertTrue(pool.wait(0.2))
+        pool.close_all()
+        self.assertTrue(retained.closed)
+        self.assertTrue(wake.closed)
+        self.assertEqual(pool._streams, {})
+
+    def test_same_observation_group_shares_one_child_for_multiple_ttls(self):
+        created = []
+        class Shared:
+            def close(self):
+                pass
+            def wait(self, timeout):
+                return False
+            def health(self):
+                return {"ready": True, "error": None, "backoff_until": 0}
+        def factory(community, channel, author, wake=None):
+            stream = Shared()
+            created.append((community, channel, author, stream))
+            return stream
+        pool = _TypingStreamPool(factory)
+        first = pool.stream("c", "ch", "a")
+        second = pool.stream("c", "ch", "a")
+        other = pool.stream("c", "ch", "b")
+        self.assertIs(first, second)
+        self.assertIsNot(first, other)
+        self.assertEqual(len(created), 2)
+        pool.close_all()
+
+    def test_backoff_is_not_reset_until_eose(self):
+        stream = BuzzTypingLiveStream.__new__(BuzzTypingLiveStream)
+        stream._lock = __import__("threading").Lock()
+        stream._stop = __import__("threading").Event()
+        stream._wake = __import__("threading").Event()
+        stream._backlog = __import__("collections").deque(maxlen=10)
+        stream._backoff_until = 0
+        stream._backoff = 1.0
+        stream._ready = False
+        stream._reconnect_requested = __import__("threading").Event()
+        stream._wake_callback = lambda: None
+        stream._last_error = None
+        stream._consume('{"type":"notice"}')
+        stream._backoff = min(stream._backoff * 2, 30.0)
+        self.assertEqual(stream._backoff, 2.0)
+        stream._consume('{"type":"eose"}')
+        self.assertEqual(stream._backoff, 1.0)
 
 
 if __name__ == "__main__":
