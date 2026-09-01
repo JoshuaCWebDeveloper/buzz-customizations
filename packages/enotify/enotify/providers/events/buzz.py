@@ -33,6 +33,7 @@ class BuzzChannelEventsProvider:
         channel = self.config.get("channel")
         if not channel:
             return ()
+        self._verify_community(channel)
         since = 0
         if cursor is not None:
             try:
@@ -40,6 +41,8 @@ class BuzzChannelEventsProvider:
             except ValueError:
                 since = 0
         command = ["buzz", "messages", "get", "--channel", channel]
+        if self.config.get("kind") is not None:
+            command += ["--kinds", str(self.config["kind"])]
         if since:
             command += ["--since", str(since)]
         result = self._runner(command, check=True, capture_output=True, text=True)
@@ -63,3 +66,10 @@ class BuzzChannelEventsProvider:
                 self.provider, channel, row["id"], str(created), str(created), row
             ))
         return occurrences
+
+    def _verify_community(self, channel: str) -> None:
+        result = self._runner(["buzz", "channels", "get", "--channel", channel], check=True, capture_output=True, text=True)
+        value = json.loads(result.stdout)
+        actual = value.get("community") or value.get("community_id") if isinstance(value, dict) else None
+        if actual != self.config.get("community"):
+            raise ValueError("Buzz channel community does not match configured community")

@@ -54,6 +54,14 @@ class BuzzMessageProvider:
         channel = self.config.get("channel")
         if not channel:
             return SendResult.permanent("notification provider is not configured")
+        try:
+            result = self._runner(["buzz", "channels", "get", "--channel", channel], check=True, capture_output=True, text=True)
+            value = json.loads(result.stdout)
+            actual = value.get("community") or value.get("community_id") if isinstance(value, dict) else None
+            if actual != self.config.get("community"):
+                return SendResult.permanent("Buzz channel community does not match configured community")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return SendResult.retryable(str(exc))
         command = ["buzz", "messages", "send", "--channel", channel, "--content", "-"]
         mention = self.config.get("mention")
         content = message
@@ -72,4 +80,6 @@ class BuzzMessageProvider:
             receipt = value.get("event_id") or value.get("id")
         except (ValueError, TypeError):
             receipt = None
-        return SendResult.accepted(str(receipt or delivery_key))
+        if not receipt:
+            return SendResult.permanent("Buzz returned no signed event receipt")
+        return SendResult.accepted(str(receipt))

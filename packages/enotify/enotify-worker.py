@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sys
 import time
 from pathlib import Path
 
@@ -32,18 +33,20 @@ def main() -> int:
     store.open()
     try:
         while not stopping:
+            store.reclaim_expired()
             for subscription in store.list("active"):
-                event = EventTriggerSpec.from_mapping(subscription["event_trigger"])
-                notification = NotificationAddressSpec.from_mapping(subscription["notification_address"])
-                event_provider = event_registry().get(event.provider, event.event_type)
-                notification_provider = notification_registry().get(notification.provider, notification.notification_type)
-                # Providers receive only their own validated JSON; no credentials
-                # are read from persisted specs or emitted in worker output.
-                event_provider = type(event_provider)(config=dict(event.match))
-                notification_provider = type(notification_provider)(config=dict(notification.address))
-                Worker(store, event_provider, notification_provider).process(
-                    subscription, lambda occurrence: json.dumps(occurrence.payload or {}, sort_keys=True)
-                )
+                try:
+                    event = EventTriggerSpec.from_mapping(subscription["event_trigger"])
+                    notification = NotificationAddressSpec.from_mapping(subscription["notification_address"])
+                    event_provider = event_registry().get(event.provider, event.event_type)
+                    notification_provider = notification_registry().get(notification.provider, notification.notification_type)
+                    event_provider = type(event_provider)(config=dict(event.match))
+                    notification_provider = type(notification_provider)(config=dict(notification.address))
+                    Worker(store, event_provider, notification_provider).process(
+                        subscription, lambda occurrence: json.dumps(occurrence.payload or {}, sort_keys=True)
+                    )
+                except Exception as exc:
+                    print(f"enotify provider unavailable: {type(exc).__name__}", file=sys.stderr)
             time.sleep(interval)
     finally:
         store.close()

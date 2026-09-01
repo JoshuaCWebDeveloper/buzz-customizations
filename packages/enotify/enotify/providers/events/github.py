@@ -65,8 +65,18 @@ class GitHubCheckProvider:
             for run in runs.get("check_runs", []) if isinstance(runs, dict) else []:
                 if not isinstance(run, dict) or not self._matches(run, wanted, pull_number):
                     continue
-                identity = str(run.get("id") or f"{sha}:{run.get('name')}:{run.get('started_at')}")
-                stamp = run.get("completed_at") or run.get("started_at") or run.get("updated_at") or ""
+                stamp = str(run.get("updated_at") or run.get("completed_at") or run.get("started_at") or "")
+                if cursor and stamp and stamp <= cursor:
+                    continue
+                # A check-run ID is stable across state changes; include the
+                # normalized transition fields so queued/in-progress/completed
+                # are separate occurrences while poll/webhook replay dedupes.
+                run_id = run.get("id") or f"{sha}:{run.get('name')}"
+                transition = json.dumps(
+                    {"status": run.get("status"), "conclusion": run.get("conclusion"), "updated_at": stamp},
+                    sort_keys=True, separators=(",", ":")
+                )
+                identity = f"{run_id}:{transition}"
                 result.append(EventOccurrence(self.provider, repository, identity, str(stamp), identity, run))
         return result
 

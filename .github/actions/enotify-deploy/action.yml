@@ -15,4 +15,8 @@ runs:
   using: composite
   steps:
     - shell: bash
-      run: python3 packages/enotify/deploy.py "${{ inputs.action }}" --state-dir "${{ inputs.state-dir }}" --unit-dir "${{ inputs.unit-dir }}"
+      env:
+        ENOTIFY_ACTION: ${{ inputs.action }}
+        ENOTIFY_STATE_DIR: ${{ inputs.state-dir }}
+        ENOTIFY_UNIT_DIR: ${{ inputs.unit-dir }}
+      run: python3 packages/enotify/deploy.py "$ENOTIFY_ACTION" --state-dir "$ENOTIFY_STATE_DIR" --unit-dir "$ENOTIFY_UNIT_DIR"

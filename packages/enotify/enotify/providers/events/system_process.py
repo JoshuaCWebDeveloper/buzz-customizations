@@ -41,13 +41,26 @@ class SystemProcessExitedProvider:
             return ()
         stat = self.proc_root / str(pid) / "stat"
         if stat.exists():
-            fields = stat.read_text(encoding="utf-8").split()
-            if len(fields) > 21 and fields[21] == identity:
+            try:
+                text = stat.read_text(encoding="utf-8")
+            except OSError:
                 return ()
+            closing = text.rfind(")")
+            fields = text[closing + 2:].split() if closing >= 0 else []
+            if len(fields) > 19 and fields[19] == identity:
+                return ()
+            if len(fields) > 19 and fields[19] != identity:
+                return ()  # PID was reused; never report the old process as exited
         occurrence_id = f"{pid}:{identity}"
         payload: dict[str, Any] = {"pid": pid, "start_identity": identity}
         for field in ("stdout_path", "stderr_path", "status_path"):
             path = self.config.get(field)
             if path and Path(path).is_file():
-                payload[field] = Path(path).read_text(encoding="utf-8", errors="replace")
+                try:
+                    data = Path(path).read_bytes()
+                except OSError:
+                    payload[field] = {"path": path, "available": False, "error": "unreadable"}
+                    continue
+                limit = 1024 * 1024
+                payload[field] = {"path": path, "available": True, "bytes": data[:limit].decode("utf-8", errors="replace"), "truncated": len(data) > limit}
         return (EventOccurrence(self.provider, str(pid), occurrence_id, "", occurrence_id, payload),)

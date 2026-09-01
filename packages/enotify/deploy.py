@@ -20,7 +20,7 @@ def install(state_dir: Path) -> None:
     )
 
 
-def unit(state_dir: Path) -> str:
+def unit(state_dir: Path, release_dir: Path = Path("/opt/enotify")) -> str:
     return """[Unit]
 Description=enotify notification worker
 After=network-online.target
@@ -28,23 +28,30 @@ After=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-{state}/enotify.env
+User=enotify
+Group=enotify
 WorkingDirectory={root}
 ExecStart=/usr/bin/env python3 {root}/enotify-worker.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths={state}
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-""".format(state=state_dir, root=Path(__file__).resolve().parent)
+""".format(state=state_dir, root=release_dir)
 
 
 def service_action(action: str, unit_dir: Path, runner=subprocess.run) -> None:
-    result = runner(["systemctl", action, UNIT_NAME], check=False)
+    command = ["systemctl", action] if action == "daemon-reload" else ["systemctl", action, UNIT_NAME]
+    result = runner(command, check=False)
     if getattr(result, "returncode", 0) != 0:
         raise RuntimeError(f"systemctl {action} failed")
 
 
-def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run) -> None:
+def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run, release_dir: Path = Path("/opt/enotify")) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     destination = unit_dir / UNIT_NAME
     if action == "install":
@@ -52,7 +59,10 @@ def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run) 
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             destination.with_suffix(".service.bak").write_bytes(destination.read_bytes())
-        destination.write_text(unit(state_dir), encoding="utf-8")
+        destination.write_text(unit(state_dir, release_dir), encoding="utf-8")
+        service_action("daemon-reload", unit_dir, runner)
+        service_action("enable", unit_dir, runner)
+        service_action("start", unit_dir, runner)
         return
     if action == "rollback":
         backup = destination.with_suffix(".service.bak")
@@ -87,12 +97,13 @@ def main(argv: list[str] | None = None) -> int:
         "--state-dir", default=str(Path.home() / ".local/state/enotify")
     )
     parser.add_argument("--unit-dir", default=os.environ.get("ENOTIFY_UNIT_DIR", "/etc/systemd/system"))
+    parser.add_argument("--release-dir", default=os.environ.get("ENOTIFY_RELEASE_DIR", "/opt/enotify"))
     args = parser.parse_args(argv)
     state_dir = Path(args.state_dir)
     if args.action == "uninstall":
         uninstall(state_dir)
     else:
-        deploy(args.action, state_dir, Path(args.unit_dir))
+        deploy(args.action, state_dir, Path(args.unit_dir), release_dir=Path(args.release_dir))
     return 0
 
 

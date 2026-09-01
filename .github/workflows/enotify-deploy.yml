@@ -17,7 +17,7 @@ jobs:
   deploy:
     # Bind this workflow to an explicitly approved production environment.
     environment: production
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, enotify-production]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/enotify-deploy
