@@ -87,11 +87,16 @@ class BuzzTypingTransitionsProvider:
         if self._last_tick_id:
             self._seen.add(self._last_tick_id)
 
-    def _occurrence(self, direction: str, prior: str, new: str, timestamp: int) -> EventOccurrence:
+    def _occurrence(self, direction: str, prior: str, new: str, timestamp: int,
+                    observed_at: int | None = None) -> EventOccurrence:
         identity = f"{self.source}:{direction}:{timestamp}"
         occurrence_id = hashlib.sha256(identity.encode()).hexdigest()
         payload = {"community": self.config["community"], "channel": self.config["channel"], "author": self.config["author"], "direction": direction, "prior_state": prior, "new_state": new, "transition_at": timestamp, "semantic_transition_time": timestamp, "source": self.source}
-        return EventOccurrence(self.provider, self.source, occurrence_id, str(timestamp), str(timestamp), payload)
+        return EventOccurrence(self.provider, self.source, occurrence_id, str(observed_at if observed_at is not None else timestamp), str(timestamp), payload)
+
+    def _matches(self, occurrence: EventOccurrence) -> bool:
+        return (("direction" not in self.config or self.config["direction"] == occurrence.payload["direction"]) and
+                ("state" not in self.config or self.config["state"] == occurrence.payload["new_state"]))
 
     def advance(self, now: int) -> Iterable[EventOccurrence]:
         if not self._active or self._expires_at is None or now < self._expires_at:
@@ -99,7 +104,8 @@ class BuzzTypingTransitionsProvider:
         expiry = self._expires_at
         self._active = False
         self._expires_at = None
-        return (self._occurrence("stopped", "typing", "not-typing", expiry),)
+        occurrence = self._occurrence("stopped", "typing", "not-typing", expiry, now)
+        return (occurrence,) if self._matches(occurrence) else ()
 
     def _apply(self, event_id: str, timestamp: int, observed_at: int) -> list[EventOccurrence]:
         self._cursor = str(timestamp)
@@ -114,7 +120,9 @@ class BuzzTypingTransitionsProvider:
         self._expires_at = timestamp + self.config["ttl"]
         self._active = True
         if not was_active:
-            result.append(self._occurrence("started", "not-typing", "typing", timestamp))
+            occurrence = self._occurrence("started", "not-typing", "typing", timestamp, observed_at)
+            if self._matches(occurrence):
+                result.append(occurrence)
         return result
 
     def observe(self, cursor: str | None = None, observed_at: int | None = None) -> Iterable[EventOccurrence]:

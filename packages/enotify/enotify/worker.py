@@ -35,7 +35,8 @@ class Worker:
         match = subscription["event_trigger"].get("match", {})
         source = getattr(self.event_provider, "source", None) or match.get("channel") or match.get("repository") or str(match.get("pid", "default"))
         restore = getattr(self.event_provider, "restore", None)
-        snapshot = self.store.typing_projection(self.event_provider.provider, source)
+        projection = getattr(self.store, "typing_projection", None)
+        snapshot = projection(self.event_provider.provider, source) if projection else None
         if restore is not None and snapshot is not None:
             restore(snapshot)
         cursor = self.store.checkpoint(self.event_provider.provider, source)
