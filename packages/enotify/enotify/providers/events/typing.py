@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -51,7 +52,7 @@ class BuzzTypingTransitionsProvider:
         return {"role": self.role, "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1]}
 
     def validate_config(self, config: dict[str, Any], version: int) -> dict[str, Any]:
-        value = object_config(config, version, {"community", "channel", "author", "ttl", "direction", "state", "history_limit"}, {"community", "channel", "author"})
+        value = object_config(config, version, {"community", "channel", "author", "ttl", "direction", "state", "history_limit", "executable"}, {"community", "channel", "author"})
         for field in ("community", "channel", "author"):
             value[field] = nonempty_string(value[field], field)
         ttl = value.get("ttl", DEFAULT_TYPING_TTL)
@@ -62,6 +63,8 @@ class BuzzTypingTransitionsProvider:
         if not isinstance(history_limit, int) or isinstance(history_limit, bool) or history_limit <= 0:
             raise ValueError("history_limit must be a positive integer")
         value["history_limit"] = history_limit
+        if "executable" in value:
+            value["executable"] = nonempty_string(value["executable"], "executable")
         if "direction" in value and value["direction"] not in ("started", "stopped"):
             raise ValueError("direction must be started or stopped")
         if "state" in value and value["state"] not in ("typing", "not-typing"):
@@ -90,7 +93,7 @@ class BuzzTypingTransitionsProvider:
             return []
         self._verify_community(channel)
         stream = self._stream or _stream_pool.stream(
-            self.config["community"], channel, self.config["author"]
+            self.config["community"], channel, self.config["author"], self.config.get("executable")
         )
         rows = stream.poll()
         minimum = max(0, int(cursor) - 1) if cursor is not None else 0
@@ -145,8 +148,10 @@ class BuzzTypingLiveStream:
                  popen_factory: Callable[..., Any] | None = None,
                  clock: Callable[[], float] | None = None,
                  wake: Callable[[], Any] | None = None,
-                 stop_event: Any | None = None):
+                 stop_event: Any | None = None,
+                 executable: str | None = None):
         self.community, self.channel, self.author = community, channel, author
+        self.executable = executable
         self._popen = popen_factory or subprocess.Popen
         self._clock = clock or time.monotonic
         self._wake_callback = wake or (lambda: None)
@@ -166,7 +171,15 @@ class BuzzTypingLiveStream:
     @property
     def command(self) -> list[str]:
         filter_json = json.dumps({"kinds": [20002], "authors": [self.author], "#h": [self.channel]}, separators=(",", ":"))
-        return ["buzz-server", "events", "subscribe", "--community", self.community, "--filter", filter_json]
+        config = getattr(self, "_config", {})
+        executable = getattr(self, "executable", None) or config.get("executable") or os.environ.get("ENOTIFY_BUZZ_EVENTS") or shutil.which("buzz-events") or "buzz-events"
+        return [executable, "subscribe", "--community", self.community, "--filter", filter_json]
+
+    @staticmethod
+    def _child_env() -> dict[str, str]:
+        # Explicitly inherit the service's authenticated environment; never
+        # synthesize or log credential values here.
+        return os.environ.copy()
 
     def _supervise(self) -> None:
         while not self._stop.is_set():
@@ -176,7 +189,7 @@ class BuzzTypingLiveStream:
             child = None
             try:
                 child = self._popen(self.command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                    text=True, bufsize=1)
+                                    env=self._child_env(), text=True, bufsize=1)
                 with self._lock:
                     self._child = child
                 self._reconnect_requested.clear()
@@ -200,7 +213,7 @@ class BuzzTypingLiveStream:
             with self._lock:
                 self._ready = False
                 if child is not None and getattr(child, "returncode", None) not in (None, 0):
-                    self._last_error = "stream-exit"
+                    self._last_error = "stream-exit:%s" % getattr(child, "returncode", "unknown")
                 self._backoff_until = self._clock() + self._backoff
                 self._backoff = min(self._backoff * 2, 30.0)
             self._wake_callback()
@@ -294,8 +307,9 @@ class _RunnerTypingLiveStream:
     def poll(self) -> list[dict[str, Any]]:
         channel = self._config["channel"]
         filter_json = json.dumps({"kinds": [20002], "authors": [self._config["author"]], "#h": [channel]}, separators=(",", ":"))
-        command = ["buzz-server", "events", "subscribe", "--community", self._config["community"], "--filter", filter_json]
-        result = self._runner(command, check=True, capture_output=True, text=True)
+        executable = self._config.get("executable") or os.environ.get("ENOTIFY_BUZZ_EVENTS") or shutil.which("buzz-events") or "buzz-events"
+        command = [executable, "subscribe", "--community", self._config["community"], "--filter", filter_json]
+        result = self._runner(command, check=True, capture_output=True, env=os.environ.copy(), text=True)
         text = getattr(result, "stdout", "")
         try:
             value = json.loads(text)
@@ -321,12 +335,15 @@ class _TypingStreamPool:
         self._stream_factory = stream_factory or BuzzTypingLiveStream
         self._streams: dict[tuple[str, str, str], BuzzTypingLiveStream] = {}
 
-    def stream(self, community: str, channel: str, author: str) -> BuzzTypingLiveStream:
+    def stream(self, community: str, channel: str, author: str, executable: str | None = None) -> BuzzTypingLiveStream:
         key = (community, channel, author)
         with self._lock:
             stream = self._streams.get(key)
             if stream is None:
-                stream = self._stream_factory(*key, wake=self._wake.set)
+                if self._stream_factory is BuzzTypingLiveStream:
+                    stream = self._stream_factory(*key, wake=self._wake.set, executable=executable)
+                else:
+                    stream = self._stream_factory(*key, wake=self._wake.set)
                 self._streams[key] = stream
             self._wake.set()
             return stream

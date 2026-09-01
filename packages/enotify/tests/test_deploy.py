@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deploy import MARKER, install, rollback_release, stage_release, unit, uninstall
+from deploy import MARKER, UNIT_NAME, deploy, install, rollback_release, stage_release, unit, uninstall
 
 
 class DeployTests(unittest.TestCase):
@@ -45,3 +45,24 @@ class DeployTests(unittest.TestCase):
             rollback_release(release)
             self.assertEqual((release / "version").read_text(encoding="utf-8"), "old")
             self.assertFalse(backup.exists())
+
+    def test_install_starts_new_unit_but_restarts_active_unit(self):
+        for active, expected in ((False, "start"), (True, "restart")):
+            with self.subTest(active=active), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                calls = []
+                class Result:
+                    def __init__(self, returncode=0):
+                        self.returncode = returncode
+                def runner(command, **kwargs):
+                    calls.append(command)
+                    if command[:2] == ["systemctl", "is-active"]:
+                        return Result(0 if active else 3)
+                    return Result(0)
+                deploy("install", root / "state", root / "units", runner=runner, release_dir=root / "release")
+                self.assertIn(["systemctl", "is-active", UNIT_NAME], calls)
+                self.assertIn(["systemctl", expected, UNIT_NAME], calls)
+                if active:
+                    self.assertNotIn(["systemctl", "start", UNIT_NAME], calls)
+                else:
+                    self.assertNotIn(["systemctl", "restart", UNIT_NAME], calls)

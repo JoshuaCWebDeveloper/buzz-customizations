@@ -95,10 +95,34 @@ class TypingProviderTests(unittest.TestCase):
     def test_live_stream_command_uses_ephemeral_event_subscription(self):
         stream = BuzzTypingLiveStream.__new__(BuzzTypingLiveStream)
         stream.community, stream.channel, stream.author = "community", "channel", "author"
+        stream._config = {"executable": "/opt/buzz-server/current/buzz-events"}
         command = stream.command
-        self.assertEqual(command[:5], ["buzz-server", "events", "subscribe", "--community", "community"])
+        self.assertEqual(command[:3], ["/opt/buzz-server/current/buzz-events", "subscribe", "--community"])
         self.assertNotIn("messages", command)
         self.assertEqual(json.loads(command[-1]), {"kinds": [20002], "authors": ["author"], "#h": ["channel"]})
+
+    def test_live_stream_command_is_configurable_and_inherits_environment(self):
+        stream = BuzzTypingLiveStream.__new__(BuzzTypingLiveStream)
+        stream.community, stream.channel, stream.author = "community", "channel", "author"
+        stream._config = {"executable": "/srv/buzz-events"}
+        with patch.dict(os.environ, {"BUZZ_RELAY_URL": "relay", "BUZZ_AUTH_TAG": "tag"}, clear=True):
+            self.assertEqual(stream.command[0], "/srv/buzz-events")
+            self.assertEqual(stream._child_env()["BUZZ_AUTH_TAG"], "tag")
+
+    def test_runner_stream_uses_buzz_events_and_inherited_environment(self):
+        calls = []
+        class Result:
+            stdout = ""
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+            return Result()
+        stream = __import__("enotify.providers.events.typing", fromlist=["_RunnerTypingLiveStream"])._RunnerTypingLiveStream(
+            run, {"community": "community", "channel": "channel", "author": "author", "executable": "/srv/buzz-events"}
+        )
+        with patch.dict(os.environ, {"BUZZ_AUTH_TAG": "tag"}, clear=True):
+            stream.poll()
+        self.assertEqual(calls[0][0][0], "/srv/buzz-events")
+        self.assertEqual(calls[0][1]["env"]["BUZZ_AUTH_TAG"], "tag")
 
     def test_provider_reads_only_injected_live_stream_not_persisted_messages(self):
         calls = []
