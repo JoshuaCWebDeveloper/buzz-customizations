@@ -20,22 +20,24 @@ The initial provider implementations are validation and extension seams. They do
 
 ## CLI
 
-Run from the repository root with `PYTHONPATH=packages/enotify`:
+After deployment, agents use the installed CLI directly. It defaults to the
+shared worker database; `--db` or `ENOTIFY_DB` remains available for an
+explicit alternate state store:
 
 ```bash
-python3 packages/enotify/enotify.py provider list
-python3 packages/enotify/enotify.py provider describe event github check
-python3 packages/enotify/enotify.py subscription create \
+enotify provider list
+enotify provider describe event github check
+enotify subscription create \
   --frequency one \
   --event-spec event.json \
   --notification-spec notification.json
-python3 packages/enotify/enotify.py subscription update SUBSCRIPTION_ID \
+enotify subscription update SUBSCRIPTION_ID \
   --if-revision 1 \
   --event-spec event.json
-python3 packages/enotify/enotify.py subscription pause SUBSCRIPTION_ID --if-revision 2
-python3 packages/enotify/enotify.py subscription resume SUBSCRIPTION_ID --if-revision 3
-python3 packages/enotify/enotify.py subscription deliveries SUBSCRIPTION_ID
-python3 packages/enotify/enotify.py status
+enotify subscription pause SUBSCRIPTION_ID --if-revision 2
+enotify subscription resume SUBSCRIPTION_ID --if-revision 3
+enotify subscription deliveries SUBSCRIPTION_ID
+enotify status
 ```
 
 Create and update read each JSON spec from a file or from `-` (stdin). Only one spec may use stdin in a command. Mutating existing subscriptions requires an optimistic revision. Retry and release operate on explicit reservation IDs; exhausted `one` reservations remain selected and paused until an operator retries or releases them.

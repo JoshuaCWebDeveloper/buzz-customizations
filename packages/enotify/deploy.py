@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import grp
 import os
 from pathlib import Path
 import pwd
@@ -12,17 +13,29 @@ import tempfile
 
 MARKER = "ENOTIFY_MANAGED"
 UNIT_NAME = "enotify.service"
+CLI_NAME = "enotify"
+OPERATOR_GROUP = os.environ.get("ENOTIFY_OPERATOR_GROUP", "buzz-agent")
 
 
 def install(state_dir: Path) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
-    state_dir.chmod(0o770)
+    state_dir.chmod(0o2770)
     try:
         account = pwd.getpwnam("enotify")
     except KeyError:
         account = None
+    try:
+        operator_group = grp.getgrnam(OPERATOR_GROUP)
+    except KeyError:
+        operator_group = None
     if account is not None and os.geteuid() == 0:
-        os.chown(state_dir, account.pw_uid, account.pw_gid)
+        gid = operator_group.gr_gid if operator_group is not None else account.pw_gid
+        os.chown(state_dir, account.pw_uid, gid)
+        for name in ("enotify.db", "enotify.db-wal", "enotify.db-shm"):
+            path = state_dir / name
+            if path.exists():
+                os.chown(path, account.pw_uid, gid)
+                path.chmod(0o660)
     marker = state_dir / MARKER
     marker.write_text(
         "Managed by packages/enotify/deploy.py.\n",
@@ -41,6 +54,8 @@ EnvironmentFile=-{state}/enotify.env
 Environment=ENOTIFY_DB={state}/enotify.db
 User=enotify
 Group=enotify
+SupplementaryGroups={operator_group}
+UMask=0007
 WorkingDirectory={root}
 ExecStart=/usr/bin/env python3 {root}/enotify-worker.py
 NoNewPrivileges=true
@@ -52,7 +67,23 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-""".format(state=state_dir, root=release_dir)
+""".format(state=state_dir, root=release_dir, operator_group=OPERATOR_GROUP)
+
+
+def install_cli(bin_dir: Path, state_dir: Path, release_dir: Path) -> None:
+    bin_dir = _absolute_scoped(bin_dir, "bin-dir")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    destination = bin_dir / CLI_NAME
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    temporary.write_text(
+        "#!/bin/sh\n"
+        f'ENOTIFY_DB="${{ENOTIFY_DB:-{state_dir / "enotify.db"}}}"\n'
+        "export ENOTIFY_DB\n"
+        f'exec /usr/bin/env python3 "{release_dir / "enotify.py"}" "$@"\n',
+        encoding="utf-8",
+    )
+    temporary.chmod(0o755)
+    os.replace(temporary, destination)
 
 
 def service_action(action: str, unit_dir: Path, runner=subprocess.run) -> None:
@@ -122,16 +153,19 @@ def rollback_release(release_dir: Path) -> None:
         shutil.rmtree(displaced)
 
 
-def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run, release_dir: Path = Path("/opt/enotify")) -> None:
+def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run,
+           release_dir: Path = Path("/opt/enotify"), bin_dir: Path = Path("/usr/local/bin")) -> None:
     state_dir = _absolute_scoped(state_dir, "state-dir")
     unit_dir = _absolute_scoped(unit_dir, "unit-dir")
     release_dir = _absolute_scoped(release_dir, "release-dir")
+    bin_dir = _absolute_scoped(bin_dir, "bin-dir")
     state_dir.mkdir(parents=True, exist_ok=True)
     destination = unit_dir / UNIT_NAME
     if action == "install":
         was_active = service_is_active(unit_dir, runner)
         install(state_dir)
         stage_release(release_dir)
+        install_cli(bin_dir, state_dir, release_dir)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             destination.with_suffix(".service.bak").write_bytes(destination.read_bytes())
@@ -159,6 +193,7 @@ def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run, 
     if action == "undeploy":
         service_action("stop", unit_dir, runner)
         destination.unlink(missing_ok=True)
+        (bin_dir / CLI_NAME).unlink(missing_ok=True)
         (state_dir / MARKER).unlink(missing_ok=True)
         service_action("daemon-reload", unit_dir, runner)
         return
@@ -179,12 +214,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--unit-dir", default=os.environ.get("ENOTIFY_UNIT_DIR", "/etc/systemd/system"))
     parser.add_argument("--release-dir", default=os.environ.get("ENOTIFY_RELEASE_DIR", "/opt/enotify"))
+    parser.add_argument("--bin-dir", default=os.environ.get("ENOTIFY_BIN_DIR", "/usr/local/bin"))
     args = parser.parse_args(argv)
     state_dir = Path(args.state_dir)
     if args.action == "uninstall":
         uninstall(state_dir)
     else:
-        deploy(args.action, state_dir, Path(args.unit_dir), release_dir=Path(args.release_dir))
+        deploy(args.action, state_dir, Path(args.unit_dir), release_dir=Path(args.release_dir), bin_dir=Path(args.bin_dir))
     return 0
 
 
