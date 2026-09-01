@@ -1,7 +1,9 @@
 import json
 import os
+import threading
 import time
 import unittest
+from io import StringIO
 from unittest.mock import patch
 
 from enotify.providers.events.typing import (
@@ -250,23 +252,147 @@ class TypingProviderTests(unittest.TestCase):
         self.assertEqual(len(created), 2)
         pool.close_all()
 
-    def test_backoff_is_not_reset_until_eose(self):
-        stream = BuzzTypingLiveStream.__new__(BuzzTypingLiveStream)
-        stream._lock = __import__("threading").Lock()
-        stream._stop = __import__("threading").Event()
-        stream._wake = __import__("threading").Event()
-        stream._backlog = __import__("collections").deque(maxlen=10)
-        stream._backoff_until = 0
-        stream._backoff = 1.0
-        stream._ready = False
-        stream._reconnect_requested = __import__("threading").Event()
-        stream._wake_callback = lambda: None
-        stream._last_error = None
-        stream._consume('{"type":"notice"}')
-        stream._backoff = min(stream._backoff * 2, 30.0)
-        self.assertEqual(stream._backoff, 2.0)
-        stream._consume('{"type":"eose"}')
+    def test_supervisor_caps_pre_eose_backoff_and_resets_after_real_eose(self):
+        class Clock:
+            now = 0.0
+            def __call__(self):
+                return self.now
+
+        class Gate:
+            def __init__(self, clock):
+                self.clock, self.delays, self.stopped = clock, [], False
+            def is_set(self):
+                return self.stopped
+            def wait(self, delay):
+                self.delays.append(delay)
+                self.clock.now += delay
+                return False
+            def set(self):
+                self.stopped = True
+
+        class Output:
+            def __iter__(self):
+                yield '{"type":"eose"}'
+                while not gate.is_set():
+                    time.sleep(0.001)
+
+        class Child:
+            def __init__(self):
+                self.stdout = Output()
+                self.returncode = 0
+            def terminate(self):
+                gate.set()
+            def wait(self, timeout=None):
+                return 0
+            def kill(self):
+                gate.set()
+
+        clock = Clock()
+        gate = Gate(clock)
+        attempts, observed = [], []
+        eose_seen = threading.Event()
+
+        class ObservedStream(BuzzTypingLiveStream):
+            def _consume(self, line):
+                super()._consume(line)
+                if json.loads(line).get("type") == "eose":
+                    observed.append(self._backoff)
+                    eose_seen.set()
+
+        def popen(command, **kwargs):
+            attempts.append(len(attempts) + 1)
+            if len(attempts) <= 6:
+                raise OSError("unavailable")
+            return Child()
+
+        stream = ObservedStream("c", "ch", "a", popen_factory=popen, clock=clock, stop_event=gate)
+        self.assertTrue(eose_seen.wait(1))
+        self.assertEqual(len(attempts), 7)
+        self.assertGreaterEqual(max(gate.delays), 16.0)
         self.assertEqual(stream._backoff, 1.0)
+        self.assertEqual(observed, [1.0])
+        stream.close()
+
+    def test_real_stream_close_terminates_blocking_reader_and_backoff_wait(self):
+        children = []
+        class Child:
+            def __init__(self):
+                self.read_fd, self.write_fd = os.pipe()
+                self.stdout = os.fdopen(self.read_fd, "r")
+                self.returncode = None
+                self.terminated = False
+            def terminate(self):
+                self.terminated = True
+                os.close(self.write_fd)
+            def wait(self, timeout=None):
+                self.returncode = 0
+            def kill(self):
+                self.terminated = True
+
+        def popen(command, **kwargs):
+            child = Child()
+            children.append(child)
+            return child
+
+        blocking = BuzzTypingLiveStream("c", "blocking", "a", popen_factory=popen)
+        for _ in range(100):
+            if children:
+                break
+            time.sleep(0.005)
+        self.assertTrue(children)
+        blocking.close()
+        self.assertTrue(children[0].terminated)
+        self.assertTrue(children[0].stdout.closed)
+        self.assertFalse(blocking._thread.is_alive())
+
+        def unavailable(*args, **kwargs):
+            raise OSError("down")
+        failing = BuzzTypingLiveStream("c", "backoff", "a", popen_factory=unavailable)
+        time.sleep(0.01)
+        failing.close()
+        self.assertFalse(failing._thread.is_alive())
+
+    def test_health_reporting_is_transition_based_and_recovery_clears_error(self):
+        source = ("c", "ch", "a")
+        reported = {}
+        stderr = StringIO()
+        with patch("sys.stderr", stderr):
+            from importlib.util import module_from_spec, spec_from_file_location
+            spec = spec_from_file_location("enotify_worker_test", os.path.join(os.path.dirname(__file__), "..", "..", "..", "enotify-worker.py"))
+            module = module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.report_typing_health({"source": source, "error": "spawn-failure"}, reported)
+            module.report_typing_health({"source": source, "error": "spawn-failure"}, reported)
+            module.report_typing_health({"source": source, "error": None}, reported)
+            module.report_typing_health({"source": source, "error": None}, reported)
+        self.assertEqual(stderr.getvalue().count("enotify typing stream status:"), 2)
+        self.assertIn("spawn-failure", stderr.getvalue())
+        self.assertIn("recovered", stderr.getvalue())
+
+    def test_signal_wake_is_immediate_and_service_finally_closes_streams(self):
+        pool = _TypingStreamPool()
+        waiter = threading.Thread(target=lambda: pool.wait(10), daemon=True)
+        waiter.start()
+        started = time.monotonic()
+        pool._wake.set()
+        waiter.join(1)
+        self.assertFalse(waiter.is_alive())
+        self.assertLess(time.monotonic() - started, 1)
+
+        from importlib.util import module_from_spec, spec_from_file_location
+        worker_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "enotify-worker.py")
+        spec = spec_from_file_location("enotify_worker_shutdown_test", worker_path)
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        class FakeStore:
+            def __init__(self, path): pass
+            def open(self): pass
+            def close(self): self.closed = True
+        module.stopping = True
+        with patch.object(module, "Store", FakeStore), patch.object(module.signal, "signal"), patch.object(module, "close_typing_streams") as close:
+            self.assertEqual(module.main(), 0)
+        close.assert_called_once()
+        module.stopping = False
 
 
 if __name__ == "__main__":

@@ -20,6 +20,19 @@ from enotify.worker import Worker
 stopping = False
 
 
+def report_typing_health(health: dict, reported: dict[tuple, str | None]) -> None:
+    source = tuple(health.get("source", ()))
+    current = health.get("error")
+    previous = reported.get(source)
+    if current == previous:
+        return
+    if current:
+        print(f"enotify typing stream status: {current}", file=sys.stderr)
+    elif previous:
+        print("enotify typing stream status: recovered", file=sys.stderr)
+    reported[source] = current
+
+
 def stop(_signum, _frame):
     global stopping
     stopping = True
@@ -33,6 +46,7 @@ def main() -> int:
     interval = max(1, int(os.environ.get("ENOTIFY_POLL_SECONDS", "15")))
     store = Store(database)
     store.open()
+    reported_health = {}
     try:
         while not stopping:
             store.reclaim_expired()
@@ -54,8 +68,7 @@ def main() -> int:
                     print(f"enotify provider unavailable: {type(exc).__name__}", file=sys.stderr)
             prune_typing_streams(active_streams)
             for health in typing_stream_health():
-                if health.get("error"):
-                    print(f"enotify typing stream status: {health['error']}", file=sys.stderr)
+                report_typing_health(health, reported_health)
             due = store.typing_due()
             timeout = interval if due is None else max(0, min(interval, due - int(time.time())))
             # A live typing reader wakes the scheduler as soon as a tick

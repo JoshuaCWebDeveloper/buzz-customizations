@@ -144,14 +144,15 @@ class BuzzTypingLiveStream:
     def __init__(self, community: str, channel: str, author: str,
                  popen_factory: Callable[..., Any] | None = None,
                  clock: Callable[[], float] | None = None,
-                 wake: Callable[[], Any] | None = None):
+                 wake: Callable[[], Any] | None = None,
+                 stop_event: Any | None = None):
         self.community, self.channel, self.author = community, channel, author
         self._popen = popen_factory or subprocess.Popen
         self._clock = clock or time.monotonic
         self._wake_callback = wake or (lambda: None)
         self._child: Any = None
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        self._stop = stop_event or threading.Event()
         self._wake = threading.Event()
         self._backlog: deque[dict[str, Any]] = deque(maxlen=STREAM_BACKLOG_LIMIT)
         self._backoff_until = 0.0
@@ -216,6 +217,7 @@ class BuzzTypingLiveStream:
             with self._lock:
                 self._ready = True
                 self._backoff = 1.0
+                self._last_error = None
             self._wake.set()
             self._wake_callback()
             return
