@@ -78,6 +78,11 @@ class Store:
         self.db.execute("INSERT OR REPLACE INTO leases VALUES(?,?,?,?)",(sid,occurrence_id,revision,datetime.now(timezone.utc).timestamp()+ttl_seconds))
         self.db.execute("INSERT OR IGNORE INTO notification_attempts VALUES(?,?,?,?,?,?,?)",(sid,occurrence_id,attempt,f"{sid}/{occurrence_id}","started",None,now()))
         self.db.commit(); return True
+    def accepted_for(self,sid,occurrence_id):
+        return self.db.execute("SELECT 1 FROM accepted_deliveries WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)).fetchone() is not None
+    def reclaim_expired(self):
+        now_epoch=datetime.now(timezone.utc).timestamp()
+        cur=self.db.execute("DELETE FROM leases WHERE expires_at<=?",(now_epoch,)); self.db.commit(); return cur.rowcount
     def accepted(self,sid,occurrence_id,delivery_id):
         self.db.execute("BEGIN IMMEDIATE")
         row=self.db.execute("SELECT * FROM subscriptions WHERE id=?",(sid,)).fetchone()

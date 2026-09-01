@@ -14,7 +14,7 @@ def main(argv=None):
     c=ss.add_parser("create"); c.add_argument("--frequency",required=True); c.add_argument("--event",required=True); c.add_argument("--notification",required=True)
     for action in ("list","get","pause","resume","delete","status","deliveries","retry","release"):
         q=ss.add_parser(action); q.add_argument("id",nargs="?"); q.add_argument("--if-revision",type=int)
-        if action in ("deliveries","retry","release"): q.add_argument("--occurrence",required=True)
+        if action in ("retry","release"): q.add_argument("--occurrence",required=True)
         if action=="retry": q.add_argument("--attempt",type=int,default=1)
     u=ss.add_parser("update"); u.add_argument("id"); u.add_argument("--frequency"); u.add_argument("--event"); u.add_argument("--notification"); u.add_argument("--if-revision",type=int)
     a=parser.parse_args(argv)
