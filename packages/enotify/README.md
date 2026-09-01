@@ -88,11 +88,16 @@ transitions; refresh ticks extend the semantic deadline without emitting.
 }
 ```
 
+The live stream executable is selected from the validated `executable` match
+field, then `ENOTIFY_BUZZ_EVENTS`, then `buzz-events` on the service `PATH`.
+The worker passes its inherited authenticated environment to that executable;
+credential values are never copied into the subscription or command line.
+
 Expiry is emitted at `last_tick_created_at + ttl`, even when no new relay
 event arrives. The provider exposes a due deadline to the worker scheduler;
 observation never blocks waiting for expiry. Typing ticks are ephemeral: the
-provider supervises `buzz-server events subscribe --community ... --filter
-'{"kinds":[20002],"authors":[...],"#h":[...]}'` as JSONL and consumes
+provider supervises the configured/discovered `buzz-events subscribe
+--community ... --filter '{"kinds":[20002],"authors":[...],"#h":[...]}'` as JSONL and consumes
 `event` records through the initial `eose`. It never falls back to
 `buzz messages get`. One bounded, reconnecting stream is shared per
 community/channel/author; TTL-specific projections remain isolated in the

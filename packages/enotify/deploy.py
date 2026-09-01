@@ -62,6 +62,11 @@ def service_action(action: str, unit_dir: Path, runner=subprocess.run) -> None:
         raise RuntimeError(f"systemctl {action} failed")
 
 
+def service_is_active(unit_dir: Path, runner=subprocess.run) -> bool:
+    result = runner(["systemctl", "is-active", UNIT_NAME], check=False)
+    return getattr(result, "returncode", 1) == 0
+
+
 def _absolute_scoped(path: Path, label: str) -> Path:
     path = path.resolve()
     if not path.is_absolute() or str(path) in ("/", ""):
@@ -124,6 +129,7 @@ def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run, 
     state_dir.mkdir(parents=True, exist_ok=True)
     destination = unit_dir / UNIT_NAME
     if action == "install":
+        was_active = service_is_active(unit_dir, runner)
         install(state_dir)
         stage_release(release_dir)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -134,7 +140,7 @@ def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run, 
         os.replace(temporary, destination)
         service_action("daemon-reload", unit_dir, runner)
         service_action("enable", unit_dir, runner)
-        service_action("start", unit_dir, runner)
+        service_action("restart" if was_active else "start", unit_dir, runner)
         return
     if action == "rollback":
         backup = destination.with_suffix(".service.bak")
