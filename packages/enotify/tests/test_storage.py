@@ -20,12 +20,12 @@ class StorageTests(unittest.TestCase):
     def test_migrations_are_repeatable_and_wal_enabled(self):
         with tempfile.TemporaryDirectory() as directory:
             first = self.open_store(directory)
-            self.assertEqual(first.status()["migration_version"], 1)
+            self.assertEqual(first.status()["migration_version"], 5)
             self.assertEqual(first.status()["journal_mode"], "wal")
             first.close()
             second = self.open_store(directory)
             self.assertEqual(
-                second.db.execute("SELECT COUNT(*) FROM migrations").fetchone()[0], 1
+                second.db.execute("SELECT COUNT(*) FROM migrations").fetchone()[0], 5
             )
             second.close()
 
@@ -71,6 +71,28 @@ class StorageTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(reserve, (first["id"], second["id"])))
             self.assertEqual(sum(result is not None for result in results), 1)
+
+    def test_typing_projection_serializes_equal_ticks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "enotify.sqlite"
+            seed = self.open_store(directory)
+            seed.close()
+            def make(direction, timestamp, observed):
+                prior, new = (("typing", "not-typing") if direction == "stopped" else ("not-typing", "typing"))
+                return EventOccurrence("buzz", "typing-source", f"{direction}-{timestamp}", str(observed), str(timestamp), {"direction": direction, "prior_state": prior, "new_state": new})
+            def apply(_):
+                store = Store(path)
+                store.open()
+                try:
+                    return store.process_typing_tick("buzz", "typing-source", "tick", 100, 100, 8, make, lambda _: True)
+                finally:
+                    store.close()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(apply, (1, 2)))
+            self.assertEqual(sum(len(result) for result in results), 1)
+            check = self.open_store(directory)
+            self.assertEqual(check.typing_projection("buzz", "typing-source")["expires_at"], 108)
+            check.close()
 
     def test_late_acceptance_is_recorded_without_resurrection(self):
         with tempfile.TemporaryDirectory() as directory:

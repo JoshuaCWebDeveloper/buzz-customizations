@@ -1,0 +1,1 @@
+ALTER TABLE typing_projections ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;

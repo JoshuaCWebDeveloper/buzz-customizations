@@ -47,7 +47,13 @@ def main() -> int:
                     )
                 except Exception as exc:
                     print(f"enotify provider unavailable: {type(exc).__name__}", file=sys.stderr)
-            time.sleep(interval)
+            due = store.typing_due()
+            timeout = interval if due is None else max(0, min(interval, due - int(time.time())))
+            # Bounded, interruptible sleep; the next loop evaluates due rows
+            # before reading relay events, so no relay event is required.
+            end = time.monotonic() + timeout
+            while not stopping and time.monotonic() < end:
+                time.sleep(min(0.25, max(0, end - time.monotonic())))
     finally:
         store.close()
     return 0

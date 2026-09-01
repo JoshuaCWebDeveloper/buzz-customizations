@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,7 @@ from enotify.providers.events import EventOccurrence
 from enotify.providers.notifications import SendResult
 from enotify.storage import Store
 from enotify.worker import Worker
+from enotify.providers.events.typing import BuzzTypingTransitionsProvider
 from tests.helpers import specs
 
 
@@ -104,4 +106,129 @@ class WorkerTests(unittest.TestCase):
                 store.db.execute("SELECT COUNT(*) FROM accepted_deliveries").fetchone()[0],
                 1,
             )
+            store.close()
+
+    def test_typing_refresh_is_durable_and_expiry_needs_no_relay_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            event = event.__class__("buzz", "typing-transitions", 1, {"community": "c", "channel": "ch", "author": "a", "ttl": 8})
+            subscription = store.create("all", event, notification)
+            rows = [{"id": "tick-1", "kind": 20002, "pubkey": "a", "created_at": 100, "tags": [["h", "ch"]]}]
+            class Result:
+                stdout = json.dumps({"community": "c"} if False else rows)
+            def run(command, **kwargs):
+                result = Result()
+                result.stdout = json.dumps({"community": "c"}) if "channels" in command else json.dumps(rows)
+                return result
+            provider = BuzzTypingTransitionsProvider(run, dict(event.match), lambda: 100)
+            sender = FakeNotifications([SendResult.accepted("start")])
+            Worker(store, provider, sender, clock=lambda: 100).process(subscription, lambda occurrence: occurrence.payload["direction"])
+            self.assertEqual(store.typing_projection("buzz", provider.source)["expires_at"], 108)
+            restarted = BuzzTypingTransitionsProvider(run, dict(event.match), lambda: 108)
+            sender2 = FakeNotifications([SendResult.accepted("stop")])
+            Worker(store, restarted, sender2, clock=lambda: 108).process(subscription, lambda occurrence: occurrence.payload["direction"])
+            self.assertEqual(sender2.keys, [sender2.keys[0]])
+            self.assertEqual(store.typing_projection("buzz", provider.source)["active"], 0)
+            store.close()
+
+    def test_same_source_fans_out_durable_transition_to_both_subscriptions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            match = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
+            event = event.__class__("buzz", "typing-transitions", 1, match)
+            first = store.create("all", event, notification)
+            second = store.create("all", event, notification)
+            rows = [{"id": "tick-1", "kind": 20002, "pubkey": "a", "created_at": 100, "tags": [["h", "ch"]]}]
+            def run(command, **kwargs):
+                class Result: pass
+                result = Result()
+                result.stdout = json.dumps({"community": "c"} if "channels" in command else rows)
+                return result
+            for subscription in (first, second):
+                provider = BuzzTypingTransitionsProvider(run, match)
+                Worker(store, provider, FakeNotifications([SendResult.accepted("ok")]), clock=lambda: 100).process(subscription, lambda occurrence: occurrence.payload["direction"])
+            self.assertEqual(store.db.execute("SELECT COUNT(*) FROM event_occurrences").fetchone()[0], 1)
+            self.assertEqual(store.db.execute("SELECT COUNT(*) FROM delivery_reservations").fetchone()[0], 2)
+            store.close()
+
+    def test_consumer_boundary_excludes_late_history_and_filters_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            base = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
+            started = event.__class__("buzz", "typing-transitions", 1, {**base, "direction": "started"})
+            stopped = event.__class__("buzz", "typing-transitions", 1, {**base, "direction": "stopped"})
+            first = store.create("all", started, notification)
+            rows = [{"id": "tick-1", "kind": 20002, "pubkey": "a", "created_at": 100, "tags": [["h", "ch"]]}]
+            def run(command, **kwargs):
+                class Result: pass
+                result = Result(); result.stdout = json.dumps({"community": "c"} if "channels" in command else rows); return result
+            sender = FakeNotifications([SendResult.accepted("start")])
+            Worker(store, BuzzTypingTransitionsProvider(run, base), sender, clock=lambda: 100).process(first, lambda occurrence: occurrence.payload["direction"])
+            late = store.create("all", stopped, notification)
+            late_sender = FakeNotifications([])
+            Worker(store, BuzzTypingTransitionsProvider(run, base), late_sender, clock=lambda: 100).process(late, lambda occurrence: occurrence.payload["direction"])
+            self.assertEqual(late_sender.keys, [])
+            # A due stop is consumed by the opposite filter once, then the
+            # consumer cursor prevents rescanning it on the next poll.
+            stop_sender = FakeNotifications([SendResult.accepted("stop")])
+            Worker(store, BuzzTypingTransitionsProvider(run, base), stop_sender, clock=lambda: 108).process(late, lambda occurrence: occurrence.payload["direction"])
+            Worker(store, BuzzTypingTransitionsProvider(run, base), stop_sender, clock=lambda: 108).process(late, lambda occurrence: occurrence.payload["direction"])
+            self.assertEqual(len(stop_sender.keys), 1)
+            store.close()
+
+    def test_restart_recovers_occurrence_committed_before_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            match = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
+            event = event.__class__("buzz", "typing-transitions", 1, match)
+            subscription = store.create("all", event, notification)
+            def run(command, **kwargs):
+                class Result: pass
+                result = Result(); result.stdout = json.dumps({"community": "c"} if "channels" in command else []); return result
+            provider = BuzzTypingTransitionsProvider(run, match)
+            occurrence = store.process_typing_tick("buzz", provider.source, "tick-1", 100, 100, 8, provider.transition_occurrence, lambda _: True)[0]
+            # Simulate process death here: the durable occurrence exists, but
+            # no reservation has been created yet.
+            sender = FakeNotifications([SendResult.accepted("recovered")])
+            Worker(store, BuzzTypingTransitionsProvider(run, match), sender, clock=lambda: 100).process(subscription, lambda item: item.payload["direction"])
+            self.assertEqual(len(sender.keys), 1)
+            self.assertEqual(store.db.execute("SELECT COUNT(*) FROM delivery_reservations").fetchone()[0], 1)
+            store.close()
+
+    def test_same_cursor_stop_start_survives_consumer_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            match = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
+            event = event.__class__("buzz", "typing-transitions", 1, match)
+            subscription = store.create("all", event, notification)
+            provider = BuzzTypingTransitionsProvider(config=match)
+            store.process_typing_tick("buzz", provider.source, "tick-1", 100, 100, 8, provider.transition_occurrence, lambda _: True)
+            initial = store.typing_consumer_occurrences(subscription["id"], provider.source)[0]
+            store.advance_typing_consumer(subscription["id"], provider.source, initial.cursor, initial.occurrence_id)
+            store.process_typing_tick("buzz", provider.source, "tick-2", 108, 108, 8, provider.transition_occurrence, lambda _: True)
+            pending = store.typing_consumer_occurrences(subscription["id"], provider.source)
+            self.assertEqual([item.payload["direction"] for item in pending], ["stopped", "started"])
+            store.advance_typing_consumer(subscription["id"], provider.source, pending[0].cursor, pending[0].occurrence_id)
+            after_restart = store.typing_consumer_occurrences(subscription["id"], provider.source)
+            self.assertEqual([item.payload["direction"] for item in after_restart], ["started"])
+            store.close()
+
+    def test_notification_only_update_keeps_typing_consumer_eligible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            match = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
+            event = event.__class__("buzz", "typing-transitions", 1, match)
+            subscription = store.create("all", event, notification)
+            source = BuzzTypingTransitionsProvider(config=match).source
+            before = dict(store.db.execute("SELECT revision,cursor FROM typing_consumers WHERE subscription_id=?", (subscription["id"],)).fetchone())
+            updated = store.update(subscription["id"], subscription["revision"], frequency="one")
+            after = dict(store.db.execute("SELECT revision,cursor FROM typing_consumers WHERE subscription_id=?", (subscription["id"],)).fetchone())
+            self.assertEqual(after["revision"], updated["revision"])
+            self.assertEqual(after["cursor"], before["cursor"])
             store.close()

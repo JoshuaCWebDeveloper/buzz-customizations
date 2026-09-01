@@ -22,6 +22,12 @@ def now_epoch() -> float:
     return datetime.now(timezone.utc).timestamp()
 
 
+def typing_source(match: dict[str, Any]) -> str:
+    return canonical_json({"author": match["author"], "channel": match["channel"], "community": match["community"],
+                           "event_type": "typing-transitions", "history_limit": match.get("history_limit", 1000),
+                           "provider": "buzz", "ttl": match.get("ttl", 8)})
+
+
 class Conflict(RuntimeError):
     pass
 
@@ -158,6 +164,10 @@ class Store:
                     stamp,
                 ),
             )
+            if event.provider == "buzz" and event.event_type == "typing-transitions":
+                source = typing_source(dict(event.match))
+                checkpoint = db.execute("SELECT cursor FROM provider_checkpoints WHERE provider=? AND source=?", ("buzz", source)).fetchone()
+                db.execute("INSERT INTO typing_consumers(subscription_id,source,eligible_after,cursor,updated_at,revision,cursor_occurrence_id) VALUES(?,?,?,?,?,?,?)", (subscription_id, source, stamp, int(checkpoint[0]) if checkpoint else 0, stamp, 1, ""))
             self.audit("subscription.create", subscription_id, {"frequency": frequency})
         return self.get(subscription_id)
 
@@ -202,6 +212,21 @@ class Store:
             )
             if cursor.rowcount != 1:
                 raise Conflict("revision conflict or terminal subscription")
+            old_typing = old["event_trigger"].get("provider") == "buzz" and old["event_trigger"].get("event_type") == "typing-transitions"
+            new_typing = (event.provider == "buzz" and event.event_type == "typing-transitions") if event else old_typing
+            if event and new_typing:
+                source = typing_source(dict(event.match))
+                new_revision = expected + 1
+                db.execute("DELETE FROM typing_consumers WHERE subscription_id=?", (subscription_id,))
+                checkpoint = db.execute("SELECT cursor FROM provider_checkpoints WHERE provider=? AND source=?", ("buzz", source)).fetchone()
+                db.execute("INSERT INTO typing_consumers(subscription_id,source,eligible_after,cursor,updated_at,revision,cursor_occurrence_id) VALUES(?,?,?,?,?,?,?)", (subscription_id, source, now(), int(checkpoint[0]) if checkpoint else 0, now(), new_revision, ""))
+            elif event and old_typing:
+                db.execute("DELETE FROM typing_consumers WHERE subscription_id=?", (subscription_id,))
+            elif old_typing:
+                # Non-event updates advance the subscription revision but do
+                # not change eligibility or watermark.
+                source = typing_source(dict(old["event_trigger"]["match"]))
+                db.execute("UPDATE typing_consumers SET revision=? WHERE subscription_id=? AND source=?", (expected + 1, subscription_id, source))
             self.audit("subscription.update", subscription_id, {"from_revision": expected})
         return self.get(subscription_id)
 
@@ -223,6 +248,14 @@ class Store:
             )
             if cursor.rowcount != 1:
                 raise Conflict("revision conflict or invalid state transition")
+            current = db.execute("SELECT event_json FROM subscriptions WHERE id=?", (subscription_id,)).fetchone()
+            if current and action == "pause":
+                db.execute("DELETE FROM typing_consumers WHERE subscription_id=?", (subscription_id,))
+            elif current and action == "resume" and json.loads(current[0]).get("provider") == "buzz" and json.loads(current[0]).get("event_type") == "typing-transitions":
+                match = json.loads(current[0])["match"]
+                source = typing_source(match)
+                checkpoint = db.execute("SELECT cursor FROM provider_checkpoints WHERE provider=? AND source=?", ("buzz", source)).fetchone()
+                db.execute("INSERT INTO typing_consumers(subscription_id,source,eligible_after,cursor,updated_at,revision,cursor_occurrence_id) VALUES(?,?,?,?,?,?,?)", (subscription_id, source, now(), int(checkpoint[0]) if checkpoint else 0, now(), expected + 1, ""))
             self.audit(f"subscription.{action}", subscription_id, {"from_revision": expected})
         return self.get(subscription_id)
 
@@ -251,7 +284,7 @@ class Store:
             )
             return json.loads(encoded)
 
-    def record_occurrence(self, occurrence: EventOccurrence) -> dict[str, Any]:
+    def record_occurrence(self, occurrence: EventOccurrence, projection: dict[str, Any] | None = None) -> dict[str, Any]:
         row_id = str(uuid.uuid4())
         with self._transaction() as db:
             db.execute(
@@ -283,6 +316,20 @@ class Store:
                            ON CONFLICT(provider,source) DO UPDATE SET cursor=excluded.cursor,updated_at=excluded.updated_at""",
                         (occurrence.provider, occurrence.source, occurrence.cursor, now()),
                     )
+            if projection is not None:
+                db.execute(
+                    """INSERT INTO typing_projections
+                       (provider,source,active,last_tick_at,last_tick_id,expires_at,cursor,last_transition_id,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(provider,source) DO UPDATE SET active=excluded.active,
+                       last_tick_at=excluded.last_tick_at,last_tick_id=excluded.last_tick_id,
+                       expires_at=excluded.expires_at,cursor=excluded.cursor,
+                       last_transition_id=COALESCE(excluded.last_transition_id,typing_projections.last_transition_id),
+                       updated_at=excluded.updated_at""",
+                    (occurrence.provider, occurrence.source, int(projection["active"]), projection.get("last_tick_at"),
+                     projection.get("last_tick_id"), projection.get("expires_at"), projection.get("cursor"),
+                     occurrence.occurrence_id, now()),
+                )
         return dict(row)
 
     def checkpoint(self, provider: str, source: str) -> str | None:
@@ -291,6 +338,132 @@ class Store:
             (provider, source),
         ).fetchone()
         return row["cursor"] if row else None
+
+    def typing_projection(self, provider: str, source: str) -> dict[str, Any] | None:
+        row = self._connection().execute(
+            "SELECT * FROM typing_projections WHERE provider=? AND source=?", (provider, source)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def typing_due(self) -> int | None:
+        row = self._connection().execute(
+            """SELECT MIN(p.expires_at) FROM typing_projections p
+               WHERE p.active=1 AND EXISTS (
+                 SELECT 1 FROM subscriptions s WHERE s.state='active'
+                 AND json_extract(s.event_json,'$.provider')='buzz'
+                 AND json_extract(s.event_json,'$.event_type')='typing-transitions'
+                 AND json_extract(s.event_json,'$.match.community')=json_extract(p.source,'$.community')
+                 AND json_extract(s.event_json,'$.match.channel')=json_extract(p.source,'$.channel')
+                 AND json_extract(s.event_json,'$.match.author')=json_extract(p.source,'$.author')
+                 AND COALESCE(json_extract(s.event_json,'$.match.ttl'),8)=json_extract(p.source,'$.ttl')
+                 AND COALESCE(json_extract(s.event_json,'$.match.history_limit'),1000)=json_extract(p.source,'$.history_limit'))"""
+        ).fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def typing_occurrences(self, provider: str, source: str) -> list[EventOccurrence]:
+        rows = self._connection().execute(
+            "SELECT * FROM event_occurrences WHERE provider=? AND source=? ORDER BY CAST(cursor AS INTEGER), occurrence_id",
+            (provider, source),
+        )
+        return [EventOccurrence(row["provider"], row["source"], row["occurrence_id"], row["observed_at"], row["cursor"], json.loads(row["payload_json"])) for row in rows]
+
+    def ensure_typing_consumer(self, subscription_id: str, source: str) -> None:
+        stamp = now()
+        with self._transaction() as db:
+            existing = db.execute("SELECT 1 FROM typing_consumers WHERE subscription_id=? AND source=?", (subscription_id, source)).fetchone()
+            if existing: return
+            checkpoint = db.execute("SELECT cursor FROM provider_checkpoints WHERE provider=? AND source=?", ("buzz", source)).fetchone()
+            subscription = db.execute("SELECT revision FROM subscriptions WHERE id=?", (subscription_id,)).fetchone()
+            db.execute("INSERT INTO typing_consumers(subscription_id,source,eligible_after,cursor,updated_at,revision,cursor_occurrence_id) VALUES(?,?,?,?,?,?,?)", (subscription_id, source, stamp, int(checkpoint[0]) if checkpoint else 0, stamp, subscription[0], ""))
+
+    def typing_consumer_occurrences(self, subscription_id: str, source: str, limit: int = 1000) -> list[EventOccurrence]:
+        rows = self._connection().execute(
+            """SELECT e.* FROM event_occurrences e JOIN typing_consumers c ON c.source=e.source
+               JOIN subscriptions s ON s.id=c.subscription_id
+               WHERE c.subscription_id=? AND e.provider='buzz' AND e.source=? AND c.revision=s.revision
+               AND e.created_at>=c.eligible_after AND (CAST(e.cursor AS INTEGER)>c.cursor OR (CAST(e.cursor AS INTEGER)=c.cursor AND e.occurrence_id>c.cursor_occurrence_id))
+               ORDER BY CAST(e.cursor AS INTEGER),e.occurrence_id LIMIT ?""", (subscription_id, source, limit))
+        return [EventOccurrence(row["provider"], row["source"], row["occurrence_id"], row["observed_at"], row["cursor"], json.loads(row["payload_json"])) for row in rows]
+
+    def advance_typing_consumer(self, subscription_id: str, source: str, cursor: str | None, occurrence_id: str = "") -> None:
+        if cursor is None: return
+        with self._transaction() as db:
+            db.execute("""UPDATE typing_consumers SET cursor_occurrence_id=CASE WHEN CAST(? AS INTEGER)>cursor THEN ? WHEN CAST(? AS INTEGER)=cursor THEN MAX(cursor_occurrence_id,?) ELSE cursor_occurrence_id END,
+                       cursor=MAX(cursor,CAST(? AS INTEGER)),updated_at=? WHERE subscription_id=? AND source=?""", (cursor, occurrence_id, cursor, occurrence_id, cursor, now(), subscription_id, source))
+
+    def process_typing_tick(self, provider: str, source: str, tick_id: str, tick_at: int,
+                            observed_at: int, ttl: int, make_occurrence: Callable[[str, int, int], EventOccurrence],
+                            matches: Callable[[EventOccurrence], bool]) -> list[EventOccurrence]:
+        """Serialize due-first typing evaluation, projection, cursor and log insert."""
+        emitted: list[EventOccurrence] = []
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM typing_projections WHERE provider=? AND source=?", (provider, source)).fetchone()
+            if row is None:
+                db.execute("INSERT INTO typing_projections(provider,source,active,revision,updated_at) VALUES(?,?,?,?,?)", (provider, source, 0, 1, now()))
+                row = db.execute("SELECT * FROM typing_projections WHERE provider=? AND source=?", (provider, source)).fetchone()
+            revision = row["revision"]
+            active = bool(row["active"])
+            last_tick = row["last_tick_at"]
+            expires = row["expires_at"]
+            if active and expires is not None and expires <= observed_at:
+                occurrence = make_occurrence("stopped", expires, observed_at)
+                self._insert_typing_occurrence(db, occurrence)
+                if matches(occurrence): emitted.append(occurrence)
+                active, expires = False, None
+            accepted_tick = tick_at + ttl > observed_at and (last_tick is None or tick_at > last_tick)
+            if accepted_tick:
+                was_active = active
+                active, last_tick, expires = True, tick_at, tick_at + ttl
+                if not was_active:
+                    occurrence = make_occurrence("started", tick_at, observed_at)
+                    self._insert_typing_occurrence(db, occurrence)
+                    if matches(occurrence): emitted.append(occurrence)
+            cursor = max(int(row["cursor"] or 0), tick_at)
+            db.execute("""UPDATE typing_projections SET active=?,last_tick_at=?,last_tick_id=?,expires_at=?,cursor=?,revision=revision+1,updated_at=?
+                         WHERE provider=? AND source=? AND revision=?""",
+                       (int(active), last_tick, tick_id if accepted_tick else row["last_tick_id"], expires, cursor, now(), provider, source, revision))
+            db.execute("""INSERT INTO provider_checkpoints(provider,source,cursor,updated_at) VALUES(?,?,?,?)
+                         ON CONFLICT(provider,source) DO UPDATE SET cursor=MAX(CAST(provider_checkpoints.cursor AS INTEGER),CAST(excluded.cursor AS INTEGER)),updated_at=excluded.updated_at""",
+                       (provider, source, str(cursor), now()))
+        return emitted
+
+    def expire_typing(self, provider: str, source: str, observed_at: int,
+                      make_occurrence: Callable[[str, int, int], EventOccurrence],
+                      matches: Callable[[EventOccurrence], bool]) -> list[EventOccurrence]:
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM typing_projections WHERE provider=? AND source=? AND active=1 AND expires_at<=?", (provider, source, observed_at)).fetchone()
+            if not row: return []
+            occurrence = make_occurrence("stopped", row["expires_at"], observed_at)
+            self._insert_typing_occurrence(db, occurrence)
+            db.execute("UPDATE typing_projections SET active=0,expires_at=NULL,revision=revision+1,updated_at=? WHERE provider=? AND source=? AND revision=?", (now(), provider, source, row["revision"]))
+            return [occurrence] if matches(occurrence) else []
+
+    @staticmethod
+    def _insert_typing_occurrence(db: sqlite3.Connection, occurrence: EventOccurrence) -> None:
+        db.execute("INSERT OR IGNORE INTO event_occurrences VALUES(?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), occurrence.provider, occurrence.source, occurrence.occurrence_id, occurrence.observed_at, occurrence.cursor, canonical_json(occurrence.payload or {}), now()))
+
+    def save_typing_projection(self, provider: str, source: str, state: dict[str, Any],
+                               cursor: str | None = None, last_transition_id: str | None = None,
+                               expected_revision: int | None = None) -> None:
+        """Persist the provider projection with an optimistic revision check."""
+        with self._transaction() as db:
+            current = db.execute("SELECT revision FROM typing_projections WHERE provider=? AND source=?", (provider, source)).fetchone()
+            if current is not None and expected_revision is None:
+                raise Conflict("typing projection revision is required")
+            if current is not None and current[0] != expected_revision:
+                raise Conflict("typing projection revision conflict")
+            db.execute(
+                """INSERT INTO typing_projections
+                   (provider,source,active,last_tick_at,last_tick_id,expires_at,cursor,last_transition_id,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(provider,source) DO UPDATE SET
+                     active=excluded.active,last_tick_at=excluded.last_tick_at,last_tick_id=excluded.last_tick_id,
+                     expires_at=excluded.expires_at,cursor=COALESCE(excluded.cursor,typing_projections.cursor),
+                     last_transition_id=COALESCE(excluded.last_transition_id,typing_projections.last_transition_id),
+                     updated_at=excluded.updated_at""",
+                (provider, source, int(state["active"]), state.get("last_tick_at"), state.get("last_tick_id"),
+                 state.get("expires_at"), cursor, last_transition_id, now()),
+            )
 
     def reserve(self, subscription_id: str, occurrence_row_id: str) -> dict[str, Any] | None:
         with self._transaction() as db:
