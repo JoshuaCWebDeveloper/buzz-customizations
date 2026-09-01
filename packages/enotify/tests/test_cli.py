@@ -5,9 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import enotify as domain
-from enotify import models
-from enotify.storage import Store
 import importlib.util
 
 
