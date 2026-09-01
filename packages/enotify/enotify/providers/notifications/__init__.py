@@ -21,12 +21,17 @@ class _Descriptor(NotificationProvider):
         unknown=set(config)-{"community","channel","mention"}
         if unknown: raise ValueError("unknown notification address fields: "+",".join(sorted(unknown)))
         if "community" not in config or "channel" not in config: raise ValueError("community and channel are required")
+        if "mention" in config and not isinstance(config["mention"], str): raise ValueError("mention must be a string")
         return dict(config)
     def send(self, message, delivery_key): return AcceptedDelivery(delivery_key)
 
 class NotificationRegistry:
     def __init__(self, providers: Iterable[NotificationProvider] = ()):
-        self._providers = {(p.provider, p.capability): p for p in providers}
+        self._providers = {}
+        for p in providers:
+            key=(p.provider,p.capability)
+            if key in self._providers: raise ValueError(f"duplicate notification provider: {p.provider}/{p.capability}")
+            self._providers[key]=p
     def get(self, provider: str, notification_type: str) -> NotificationProvider:
         try: return self._providers[(provider, notification_type)]
         except KeyError: raise KeyError(f"unknown notification provider: {provider}/{notification_type}") from None

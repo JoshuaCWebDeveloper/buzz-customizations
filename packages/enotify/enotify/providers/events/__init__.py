@@ -23,19 +23,28 @@ class _Descriptor(EventProvider):
     def describe(self): return {"role": "event", "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1]}
     def validate_config(self, config, version):
         if version != 1 or not isinstance(config, dict): raise ValueError("unsupported event schema")
-        allowed = {"channel": {"channel","author","kinds"}, "check": {"repository","check_name","pull_request"},"exited": {"pid","start_identity","stdout_path","stderr_path"}}
+        allowed = {"channel-events": {"community","channel","author","kind"}, "check": {"repository","check","pull_request"},"exited": {"pid","start_identity","stdout_path","stderr_path"}}
         unknown=set(config)-allowed[self.capability]
         if unknown: raise ValueError("unknown event match fields: "+",".join(sorted(unknown)))
+        if self.capability == "channel-events" and not isinstance(config.get("community"), str): raise ValueError("community is required")
+        if self.capability == "check" and not isinstance(config.get("check"), dict): raise ValueError("check object is required")
+        if self.capability == "exited":
+            if not isinstance(config.get("pid"), int) or config["pid"] <= 0: raise ValueError("positive pid is required")
+            if not isinstance(config.get("start_identity"), str) or not config["start_identity"]: raise ValueError("start_identity is required")
         return dict(config)
     def observe(self, cursor=None): return ()
 
 class EventRegistry:
     def __init__(self, providers: Iterable[EventProvider] = ()):
-        self._providers = {(p.provider, p.capability): p for p in providers}
+        self._providers = {}
+        for p in providers:
+            key=(p.provider,p.capability)
+            if key in self._providers: raise ValueError(f"duplicate event provider: {p.provider}/{p.capability}")
+            self._providers[key]=p
     def get(self, provider: str, event_type: str) -> EventProvider:
         try: return self._providers[(provider, event_type)]
         except KeyError: raise KeyError(f"unknown event provider: {provider}/{event_type}") from None
     def describe(self): return [p.describe() for p in sorted(self._providers.values(), key=lambda x: (x.provider, x.capability))]
 
 def default_registry() -> EventRegistry:
-    return EventRegistry((_Descriptor("buzz", "channel"), _Descriptor("github", "check"), _Descriptor("system-process", "exited")))
+    return EventRegistry((_Descriptor("buzz", "channel-events"), _Descriptor("github", "check"), _Descriptor("system-process", "exited")))

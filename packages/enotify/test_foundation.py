@@ -12,16 +12,16 @@ class FoundationTests(unittest.TestCase):
         e,n=self.specs(); self.assertEqual(e.envelope()["event_type"],"check"); self.assertEqual(canonical_json({"b":1,"a":2}), '{"a":2,"b":1}')
         with self.assertRaises(ValueError): EventTriggerSpec("event:github/pr-check","check",1,{})
     def test_role_qualified_registries_are_separate(self):
-        self.assertEqual(default_registry().get("buzz","channel").role,"event")
+        self.assertEqual(default_registry().get("buzz","channel-events").role,"event")
         self.assertEqual(notifications().get("buzz","message").role,"notification")
         with self.assertRaises(KeyError): default_registry().get("github","missing")
         with self.assertRaises(KeyError): notifications().get("buzz","missing")
     def test_provider_schema_fixtures_reject_unknown_fields(self):
         registry=default_registry()
-        self.assertEqual(registry.get("buzz","channel").validate_config({"channel":"c","author":"a","kinds":[1]},1)["channel"],"c")
-        self.assertEqual(registry.get("github","check").validate_config({"repository":"r","pull_request":42},1)["pull_request"],42)
+        self.assertEqual(registry.get("buzz","channel-events").validate_config({"community":"com","channel":"c","author":"a","kind":20002},1)["channel"],"c")
+        self.assertEqual(registry.get("github","check").validate_config({"repository":"r","check":{"name":"ci"},"pull_request":{"number":42}},1)["pull_request"]["number"],42)
         self.assertEqual(registry.get("system-process","exited").validate_config({"pid":7,"start_identity":"s"},1)["pid"],7)
-        for provider, event_type in (("buzz","channel"),("github","check"),("system-process","exited")):
+        for provider, event_type in (("buzz","channel-events"),("github","check"),("system-process","exited")):
             with self.assertRaises(ValueError): registry.get(provider,event_type).validate_config({"unexpected":True},1)
     def test_buzz_notification_address_fixture(self):
         provider=notifications().get("buzz","message")
