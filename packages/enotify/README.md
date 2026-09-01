@@ -40,6 +40,16 @@ enotify subscription deliveries SUBSCRIPTION_ID
 enotify status
 ```
 
+Specs may be inline JSON, a JSON file path, or `-` for stdin. Version 1 is the
+default schema version. This is the minimal typing-to-Buzz subscription; the
+typing TTL/history limit and omitted notification mention use provider defaults:
+
+```bash
+enotify subscription create --frequency one \
+  --event-spec '{"provider":"buzz","event_type":"typing-transitions","match":{"community":"COMMUNITY_ID","channel":"CHANNEL_ID","author":"AUTHOR_PUBKEY"}}' \
+  --notification-spec '{"provider":"buzz","notification_type":"message","address":{"community":"COMMUNITY_ID","channel":"CHANNEL_ID"}}'
+```
+
 Create and update read each JSON spec from a file or from `-` (stdin). Only one spec may use stdin in a command. Mutating existing subscriptions requires an optimistic revision. Retry and release operate on explicit reservation IDs; exhausted `one` reservations remain selected and paused until an operator retries or releases them.
 
 ## Persistence and delivery semantics
