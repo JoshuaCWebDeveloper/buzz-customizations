@@ -89,7 +89,8 @@ class BuzzTypingTransitionsProvider:
         rows = json.loads(result.stdout)
         if not isinstance(rows, list):
             raise ValueError("buzz messages get returned a non-array")
-        return [row for row in rows if _tick(row, channel, self.config["author"])]
+        return sorted((row for row in rows if _tick(row, channel, self.config["author"])),
+                      key=lambda row: (row["created_at"], row["id"]))
 
     def _verify_community(self, channel: str) -> None:
         result = self._runner(["buzz", "channels", "get", "--channel", channel], check=True, capture_output=True, text=True)

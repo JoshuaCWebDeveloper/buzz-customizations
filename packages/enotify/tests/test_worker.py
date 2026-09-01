@@ -131,3 +131,24 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(sender2.keys, [sender2.keys[0]])
             self.assertEqual(store.typing_projection("buzz", provider.source)["active"], 0)
             store.close()
+
+    def test_same_source_fans_out_durable_transition_to_both_subscriptions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            match = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
+            event = event.__class__("buzz", "typing-transitions", 1, match)
+            first = store.create("all", event, notification)
+            second = store.create("all", event, notification)
+            rows = [{"id": "tick-1", "kind": 20002, "pubkey": "a", "created_at": 100, "tags": [["h", "ch"]]}]
+            def run(command, **kwargs):
+                class Result: pass
+                result = Result()
+                result.stdout = json.dumps({"community": "c"} if "channels" in command else rows)
+                return result
+            for subscription in (first, second):
+                provider = BuzzTypingTransitionsProvider(run, match)
+                Worker(store, provider, FakeNotifications([SendResult.accepted("ok")]), clock=lambda: 100).process(subscription, lambda occurrence: occurrence.payload["direction"])
+            self.assertEqual(store.db.execute("SELECT COUNT(*) FROM event_occurrences").fetchone()[0], 1)
+            self.assertEqual(store.db.execute("SELECT COUNT(*) FROM delivery_reservations").fetchone()[0], 2)
+            store.close()

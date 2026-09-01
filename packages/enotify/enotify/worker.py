@@ -56,6 +56,12 @@ class Worker:
             for tick in observe_ticks(cursor, observed_at):
                 for occurrence in process_tick(self.event_provider.provider, source, tick["id"], tick["created_at"], observed_at, ttl, make, matches):
                     self._process_occurrence(subscription, occurrence, render, False)
+            # Ingestion is source-scoped; every active subscription independently
+            # reserves matching durable occurrences (including ones ingested by a
+            # sibling subscription with another direction/address).
+            for occurrence in self.store.typing_occurrences(self.event_provider.provider, source):
+                if matches(occurrence):
+                    self._process_occurrence(subscription, occurrence, render, False)
             return
         # Due transitions are advanced before relay input, and never by a
         # provider blocking in observe(). Providers without the optional

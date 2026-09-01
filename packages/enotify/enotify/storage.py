@@ -314,9 +314,25 @@ class Store:
 
     def typing_due(self) -> int | None:
         row = self._connection().execute(
-            "SELECT MIN(expires_at) FROM typing_projections WHERE active=1"
+            """SELECT MIN(p.expires_at) FROM typing_projections p
+               WHERE p.active=1 AND EXISTS (
+                 SELECT 1 FROM subscriptions s WHERE s.state='active'
+                 AND json_extract(s.event_json,'$.provider')='buzz'
+                 AND json_extract(s.event_json,'$.event_type')='typing-transitions'
+                 AND json_extract(s.event_json,'$.match.community')=json_extract(p.source,'$.community')
+                 AND json_extract(s.event_json,'$.match.channel')=json_extract(p.source,'$.channel')
+                 AND json_extract(s.event_json,'$.match.author')=json_extract(p.source,'$.author')
+                 AND COALESCE(json_extract(s.event_json,'$.match.ttl'),8)=json_extract(p.source,'$.ttl')
+                 AND COALESCE(json_extract(s.event_json,'$.match.history_limit'),1000)=json_extract(p.source,'$.history_limit'))"""
         ).fetchone()
         return row[0] if row and row[0] is not None else None
+
+    def typing_occurrences(self, provider: str, source: str) -> list[EventOccurrence]:
+        rows = self._connection().execute(
+            "SELECT * FROM event_occurrences WHERE provider=? AND source=? ORDER BY CAST(cursor AS INTEGER), occurrence_id",
+            (provider, source),
+        )
+        return [EventOccurrence(row["provider"], row["source"], row["occurrence_id"], row["observed_at"], row["cursor"], json.loads(row["payload_json"])) for row in rows]
 
     def process_typing_tick(self, provider: str, source: str, tick_id: str, tick_at: int,
                             observed_at: int, ttl: int, make_occurrence: Callable[[str, int, int], EventOccurrence],
@@ -337,7 +353,8 @@ class Store:
                 self._insert_typing_occurrence(db, occurrence)
                 if matches(occurrence): emitted.append(occurrence)
                 active, expires = False, None
-            if tick_at + ttl > observed_at and (last_tick is None or tick_at > last_tick):
+            accepted_tick = tick_at + ttl > observed_at and (last_tick is None or tick_at > last_tick)
+            if accepted_tick:
                 was_active = active
                 active, last_tick, expires = True, tick_at, tick_at + ttl
                 if not was_active:
@@ -347,7 +364,7 @@ class Store:
             cursor = max(int(row["cursor"] or 0), tick_at)
             db.execute("""UPDATE typing_projections SET active=?,last_tick_at=?,last_tick_id=?,expires_at=?,cursor=?,revision=revision+1,updated_at=?
                          WHERE provider=? AND source=? AND revision=?""",
-                       (int(active), last_tick, tick_id if last_tick == tick_at else row["last_tick_id"], expires, cursor, now(), provider, source, revision))
+                       (int(active), last_tick, tick_id if accepted_tick else row["last_tick_id"], expires, cursor, now(), provider, source, revision))
             db.execute("""INSERT INTO provider_checkpoints(provider,source,cursor,updated_at) VALUES(?,?,?,?)
                          ON CONFLICT(provider,source) DO UPDATE SET cursor=MAX(CAST(provider_checkpoints.cursor AS INTEGER),CAST(excluded.cursor AS INTEGER)),updated_at=excluded.updated_at""",
                        (provider, source, str(cursor), now()))
