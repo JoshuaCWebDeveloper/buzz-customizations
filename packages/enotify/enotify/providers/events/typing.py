@@ -118,7 +118,7 @@ class BuzzTypingTransitionsProvider:
         self._expires_at = snapshot.get("expires_at")
         self._cursor = snapshot.get("cursor")
         if self._last_tick_id:
-            self._seen.add(self._last_tick_id)
+            self._seen.append(self._last_tick_id)
 
     def _occurrence(self, direction: str, prior: str, new: str, timestamp: int,
                     observed_at: int | None = None) -> EventOccurrence:
@@ -145,7 +145,7 @@ class BuzzTypingTransitionsProvider:
         result = list(self.advance(observed_at))
         if event_id in self._seen or (self._last_tick is not None and timestamp <= self._last_tick):
             return result
-        self._seen.add(event_id)
+        self._seen.append(event_id)
         if timestamp + self.config["ttl"] <= observed_at:
             return result
         was_active = self._active
