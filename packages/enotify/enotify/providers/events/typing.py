@@ -5,6 +5,7 @@ import hashlib
 import json
 import subprocess
 import time
+from collections import deque
 from typing import Any, Callable, Iterable
 
 from .interface import EventOccurrence
@@ -44,7 +45,7 @@ class BuzzTypingTransitionsProvider:
         self._last_tick: int | None = None
         self._last_tick_id: str | None = None
         self._expires_at: int | None = None
-        self._seen: set[str] = set()
+        self._seen: deque[str] = deque(maxlen=2048)
         self._cursor: str | None = None
 
     def describe(self) -> dict[str, Any]:

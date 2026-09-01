@@ -22,6 +22,12 @@ def now_epoch() -> float:
     return datetime.now(timezone.utc).timestamp()
 
 
+def typing_source(match: dict[str, Any]) -> str:
+    return canonical_json({"author": match["author"], "channel": match["channel"], "community": match["community"],
+                           "event_type": "typing-transitions", "history_limit": match.get("history_limit", 1000),
+                           "provider": "buzz", "ttl": match.get("ttl", 8)})
+
+
 class Conflict(RuntimeError):
     pass
 
@@ -158,6 +164,10 @@ class Store:
                     stamp,
                 ),
             )
+            if event.provider == "buzz" and event.event_type == "typing-transitions":
+                source = typing_source(dict(event.match))
+                checkpoint = db.execute("SELECT cursor FROM provider_checkpoints WHERE provider=? AND source=?", ("buzz", source)).fetchone()
+                db.execute("INSERT INTO typing_consumers VALUES(?,?,?,?,?)", (subscription_id, source, stamp, int(checkpoint[0]) if checkpoint else 0, stamp))
             self.audit("subscription.create", subscription_id, {"frequency": frequency})
         return self.get(subscription_id)
 
@@ -202,6 +212,9 @@ class Store:
             )
             if cursor.rowcount != 1:
                 raise Conflict("revision conflict or terminal subscription")
+            if event and event.provider == "buzz" and event.event_type == "typing-transitions":
+                source = typing_source(dict(event.match))
+                db.execute("INSERT OR IGNORE INTO typing_consumers VALUES(?,?,?,?,?)", (subscription_id, source, now(), 0, now()))
             self.audit("subscription.update", subscription_id, {"from_revision": expected})
         return self.get(subscription_id)
 
@@ -333,6 +346,27 @@ class Store:
             (provider, source),
         )
         return [EventOccurrence(row["provider"], row["source"], row["occurrence_id"], row["observed_at"], row["cursor"], json.loads(row["payload_json"])) for row in rows]
+
+    def ensure_typing_consumer(self, subscription_id: str, source: str) -> None:
+        stamp = now()
+        with self._transaction() as db:
+            existing = db.execute("SELECT 1 FROM typing_consumers WHERE subscription_id=? AND source=?", (subscription_id, source)).fetchone()
+            if existing: return
+            checkpoint = db.execute("SELECT cursor FROM provider_checkpoints WHERE provider=? AND source=?", ("buzz", source)).fetchone()
+            db.execute("INSERT INTO typing_consumers VALUES(?,?,?,?,?)", (subscription_id, source, stamp, int(checkpoint[0]) if checkpoint else 0, stamp))
+
+    def typing_consumer_occurrences(self, subscription_id: str, source: str, limit: int = 1000) -> list[EventOccurrence]:
+        rows = self._connection().execute(
+            """SELECT e.* FROM event_occurrences e JOIN typing_consumers c ON c.source=e.source
+               WHERE c.subscription_id=? AND e.provider='buzz' AND e.source=?
+               AND e.created_at>=c.eligible_after AND CAST(e.cursor AS INTEGER)>c.cursor
+               ORDER BY CAST(e.cursor AS INTEGER),e.occurrence_id LIMIT ?""", (subscription_id, source, limit))
+        return [EventOccurrence(row["provider"], row["source"], row["occurrence_id"], row["observed_at"], row["cursor"], json.loads(row["payload_json"])) for row in rows]
+
+    def advance_typing_consumer(self, subscription_id: str, source: str, cursor: str | None) -> None:
+        if cursor is None: return
+        with self._transaction() as db:
+            db.execute("UPDATE typing_consumers SET cursor=MAX(cursor,CAST(? AS INTEGER)),updated_at=? WHERE subscription_id=? AND source=?", (cursor, now(), subscription_id, source))
 
     def process_typing_tick(self, provider: str, source: str, tick_id: str, tick_at: int,
                             observed_at: int, ttl: int, make_occurrence: Callable[[str, int, int], EventOccurrence],

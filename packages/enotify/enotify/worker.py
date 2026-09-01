@@ -47,6 +47,7 @@ class Worker:
         process_tick = getattr(self.store, "process_typing_tick", None)
         expire = getattr(self.store, "expire_typing", None)
         if observe_ticks is not None and process_tick is not None and expire is not None:
+            self.store.ensure_typing_consumer(subscription["id"], source)
             observed_at = self.clock()
             make = self.event_provider.transition_occurrence
             matches = self.event_provider._matches
@@ -59,9 +60,10 @@ class Worker:
             # Ingestion is source-scoped; every active subscription independently
             # reserves matching durable occurrences (including ones ingested by a
             # sibling subscription with another direction/address).
-            for occurrence in self.store.typing_occurrences(self.event_provider.provider, source):
+            for occurrence in self.store.typing_consumer_occurrences(subscription["id"], source):
                 if matches(occurrence):
                     self._process_occurrence(subscription, occurrence, render, False)
+                self.store.advance_typing_consumer(subscription["id"], source, occurrence.cursor)
             return
         # Due transitions are advanced before relay input, and never by a
         # provider blocking in observe(). Providers without the optional
