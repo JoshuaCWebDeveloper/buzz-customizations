@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import unittest
 from unittest.mock import patch
 
@@ -132,9 +133,15 @@ class TypingProviderTests(unittest.TestCase):
         os.write(write_fd, (json.dumps({"type": "event", "event": tick("live", 100)}) + "\n").encode())
         self.assertEqual(stream.poll(), [])
         os.write(write_fd, b'{"type":"eose"}\n')
-        self.assertEqual([row["id"] for row in stream.poll()], ["live"])
-        stream.close()
+        rows = []
+        for _ in range(20):
+            rows = stream.poll()
+            if rows:
+                break
+            time.sleep(0.01)
+        self.assertEqual([row["id"] for row in rows], ["live"])
         os.close(write_fd)
+        stream.close()
         self.assertTrue(children[0][1].terminated)
 
 

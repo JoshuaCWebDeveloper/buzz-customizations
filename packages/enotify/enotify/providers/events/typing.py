@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import selectors
 import subprocess
 import threading
 import time
@@ -149,75 +148,97 @@ class BuzzTypingLiveStream:
         self._popen = popen_factory or subprocess.Popen
         self._clock = clock or time.monotonic
         self._child: Any = None
-        self._selector = selectors.DefaultSelector()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._wake = threading.Event()
         self._backlog: deque[dict[str, Any]] = deque(maxlen=STREAM_BACKLOG_LIMIT)
         self._backoff_until = 0.0
         self._backoff = 1.0
         self._ready = False
-        self._start()
+        self._reconnect_requested = threading.Event()
+        self._thread = threading.Thread(target=self._supervise, name="buzz-typing-stream", daemon=True)
+        self._thread.start()
 
     @property
     def command(self) -> list[str]:
         filter_json = json.dumps({"kinds": [20002], "authors": [self.author], "#h": [self.channel]}, separators=(",", ":"))
         return ["buzz-server", "events", "subscribe", "--community", self.community, "--filter", filter_json]
 
-    def _start(self) -> None:
-        if self._child is not None or self._clock() < self._backoff_until:
-            return
+    def _supervise(self) -> None:
+        while not self._stop.is_set():
+            delay = self._backoff_until - self._clock()
+            if delay > 0 and self._stop.wait(delay):
+                break
+            child = None
+            try:
+                child = self._popen(self.command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    text=True, bufsize=1)
+                with self._lock:
+                    self._child = child
+                self._reconnect_requested.clear()
+                stdout = getattr(child, "stdout", None)
+                if stdout is None:
+                    raise RuntimeError("typing stream child has no stdout")
+                for line in stdout:
+                    if self._stop.is_set():
+                        break
+                    self._consume(line)
+                    if self._reconnect_requested.is_set():
+                        break
+                if self._stop.is_set():
+                    break
+            except Exception:
+                # Keep transport details bounded and out of notifications; the
+                # service remains healthy and the next retry is scheduled.
+                pass
+            finally:
+                self._close_child(child)
+            with self._lock:
+                self._ready = False
+                self._backoff_until = self._clock() + self._backoff
+                self._backoff = min(self._backoff * 2, 30.0)
+
+    def _consume(self, line: str) -> None:
         try:
-            self._child = self._popen(self.command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                      text=True, bufsize=1)
-            stdout = getattr(self._child, "stdout", None)
-            if stdout is not None:
-                self._selector.register(stdout, selectors.EVENT_READ)
-            self._backoff = 1.0
-        except Exception:
-            self._child = None
-            self._backoff_until = self._clock() + self._backoff
-            self._backoff = min(self._backoff * 2, 30.0)
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(value, dict):
+            return
+        kind = value.get("type")
+        if kind == "eose":
+            with self._lock:
+                self._ready = True
+                self._backoff = 1.0
+            self._wake.set()
+            return
+        if kind in ("closed", "error"):
+            # Closing the stdout pipe causes the supervisor to reconnect.
+            self._reconnect_requested.set()
+            return
+        if kind != "event" or not isinstance(value.get("event"), dict):
+            return
+        with self._lock:
+            self._backlog.append(value["event"])
+        self._wake.set()
 
     def poll(self) -> list[dict[str, Any]]:
-        self._start()
-        if self._child is None:
-            return []
-        output: list[dict[str, Any]] = []
-        try:
-            for key, _ in self._selector.select(timeout=0):
-                while True:
-                    if not self._selector.select(timeout=0):
-                        break
-                    line = key.fileobj.readline()
-                    if not line:
-                        self._reconnect()
-                        break
-                    try:
-                        value = json.loads(line)
-                    except (TypeError, ValueError):
-                        continue
-                    if isinstance(value, dict) and value.get("type") == "eose":
-                        self._ready = True
-                        continue
-                    row = value.get("event") if isinstance(value, dict) and value.get("type") == "event" else None
-                    if isinstance(row, dict):
-                        self._backlog.append(row)
-                        output.append(row)
-        except Exception:
-            self._reconnect()
+        # The reader owns the blocking pipe read; this short handoff only
+        # covers thread scheduling and does not wait for relay input.
+        self._wake.wait(0.05)
         # Return the bounded overlap buffer to every consumer.  This is the
         # fan-out boundary: different TTL providers share one child stream but
         # independently apply the same raw ticks to their durable sources.
-        return list(self._backlog) if self._ready else []
+        with self._lock:
+            return list(self._backlog) if self._ready else []
 
-    def _reconnect(self) -> None:
-        child, self._child = self._child, None
+    def _close_child(self, child: Any) -> None:
+        with self._lock:
+            if child is self._child:
+                self._child = None
         if child is None:
             return
         stdout = getattr(child, "stdout", None)
-        if stdout is not None:
-            try:
-                self._selector.unregister(stdout)
-            except Exception:
-                pass
         try:
             child.terminate()
             child.wait(timeout=1)
@@ -226,13 +247,25 @@ class BuzzTypingLiveStream:
                 child.kill()
             except Exception:
                 pass
-        self._ready = False
-        self._backoff_until = self._clock() + self._backoff
-        self._backoff = min(self._backoff * 2, 30.0)
+        if stdout is not None:
+            try:
+                stdout.close()
+            except Exception:
+                pass
+
+    def wait(self, timeout: float) -> bool:
+        signaled = self._wake.wait(max(0.0, timeout))
+        if signaled:
+            self._wake.clear()
+        return signaled
 
     def close(self) -> None:
-        self._reconnect()
-        self._selector.close()
+        self._stop.set()
+        with self._lock:
+            child = self._child
+        self._close_child(child)
+        self._wake.set()
+        self._thread.join(timeout=2)
 
 
 class _RunnerTypingLiveStream:
@@ -277,6 +310,48 @@ class _TypingStreamPool:
                 stream = BuzzTypingLiveStream(*key)
                 self._streams[key] = stream
             return stream
+
+    def prune(self, active: set[tuple[str, str, str]]) -> None:
+        with self._lock:
+            retired = [key for key in self._streams if key not in active]
+            streams = [self._streams.pop(key) for key in retired]
+        for stream in streams:
+            stream.close()
+
+    def wait(self, timeout: float) -> bool:
+        with self._lock:
+            streams = list(self._streams.values())
+        if not streams:
+            time.sleep(max(0.0, timeout))
+            return False
+        end = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < end:
+            for stream in streams:
+                if stream.wait(min(0.25, max(0.0, end - time.monotonic()))):
+                    return True
+        return False
+
+    def close_all(self) -> None:
+        with self._lock:
+            streams = list(self._streams.values())
+            self._streams.clear()
+        for stream in streams:
+            stream.close()
+
+
+def close_typing_streams() -> None:
+    """Stop all shared typing readers during service shutdown."""
+    _stream_pool.close_all()
+
+
+def prune_typing_streams(active: set[tuple[str, str, str]]) -> None:
+    """Retire streams whose source group no longer has an active subscriber."""
+    _stream_pool.prune(active)
+
+
+def wait_for_typing_activity(timeout: float) -> bool:
+    """Wait for any shared reader without polling or blocking a child read."""
+    return _stream_pool.wait(timeout)
 
 
 _stream_pool = _TypingStreamPool()

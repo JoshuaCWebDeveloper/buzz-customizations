@@ -11,6 +11,7 @@ from pathlib import Path
 
 from enotify.models import EventTriggerSpec, NotificationAddressSpec
 from enotify.providers.events.registry import default_registry as event_registry
+from enotify.providers.events.typing import close_typing_streams, prune_typing_streams, wait_for_typing_activity
 from enotify.providers.notifications.registry import default_registry as notification_registry
 from enotify.storage import Store
 from enotify.worker import Worker
@@ -34,11 +35,14 @@ def main() -> int:
     try:
         while not stopping:
             store.reclaim_expired()
+            active_streams = set()
             for subscription in store.list("active"):
                 try:
                     event = EventTriggerSpec.from_mapping(subscription["event_trigger"])
                     notification = NotificationAddressSpec.from_mapping(subscription["notification_address"])
                     event_provider = event_registry().get(event.provider, event.event_type)
+                    if event.provider == "buzz" and event.event_type == "typing-transitions":
+                        active_streams.add((event.match["community"], event.match["channel"], event.match["author"]))
                     notification_provider = notification_registry().get(notification.provider, notification.notification_type)
                     event_provider = type(event_provider)(config=dict(event.match))
                     notification_provider = type(notification_provider)(config=dict(notification.address))
@@ -47,14 +51,14 @@ def main() -> int:
                     )
                 except Exception as exc:
                     print(f"enotify provider unavailable: {type(exc).__name__}", file=sys.stderr)
+            prune_typing_streams(active_streams)
             due = store.typing_due()
             timeout = interval if due is None else max(0, min(interval, due - int(time.time())))
-            # Bounded, interruptible sleep; the next loop evaluates due rows
-            # before reading relay events, so no relay event is required.
-            end = time.monotonic() + timeout
-            while not stopping and time.monotonic() < end:
-                time.sleep(min(0.25, max(0, end - time.monotonic())))
+            # A live typing reader wakes the scheduler as soon as a tick
+            # arrives; durable deadlines remain the other wake boundary.
+            wait_for_typing_activity(timeout)
     finally:
+        close_typing_streams()
         store.close()
     return 0
 
