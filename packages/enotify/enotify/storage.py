@@ -26,6 +26,7 @@ class Store:
           PRIMARY KEY(subscription_id,occurrence_id,attempt));
         CREATE TABLE IF NOT EXISTS accepted_deliveries(subscription_id TEXT NOT NULL, occurrence_id TEXT NOT NULL,
           delivery_id TEXT NOT NULL, accepted_at TEXT NOT NULL, PRIMARY KEY(subscription_id,occurrence_id));""")
+        self.db.execute("INSERT OR IGNORE INTO migrations(version) VALUES(1)")
         self.db.commit()
     def close(self):
         if self.db: self.db.close()
@@ -34,6 +35,16 @@ class Store:
         sid=str(uuid.uuid4()); stamp=now()
         self.db.execute("INSERT INTO subscriptions VALUES(?,?,?,?,?,?,?,?,?)",(sid,1,frequency,canonical_json(event.envelope()),canonical_json(notification.envelope()),"active",None,stamp,stamp)); self.db.commit()
         return self.get(sid)
+    def update(self, sid, frequency=None, event=None, notification=None, expected=None):
+        old=self.get(sid)
+        if expected is not None and old["revision"] != expected: raise Conflict("revision conflict")
+        frequency=frequency or old["frequency"]
+        if frequency not in ("one","all"): raise ValueError("frequency must be one or all")
+        event_json=canonical_json(event.envelope()) if event else canonical_json(old["event_trigger"])
+        notification_json=canonical_json(notification.envelope()) if notification else canonical_json(old["notification_address"])
+        cur=self.db.execute("UPDATE subscriptions SET frequency=?,event_json=?,notification_json=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?",(frequency,event_json,notification_json,now(),sid,old["revision"]))
+        if cur.rowcount!=1: raise Conflict("revision conflict")
+        self.db.commit(); return self.get(sid)
     def _row(self,row):
         if not row: raise KeyError("subscription not found")
         return {"id":row["id"],"revision":row["revision"],"frequency":row["frequency"],"event_trigger":json.loads(row["event_json"]),"notification_address":json.loads(row["notification_json"]),"state":row["state"],"reason":row["reason"],"created_at":row["created_at"],"updated_at":row["updated_at"]}

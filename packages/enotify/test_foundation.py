@@ -14,9 +14,17 @@ class FoundationTests(unittest.TestCase):
     def test_role_qualified_registries_are_separate(self):
         self.assertEqual(default_registry().get("buzz","channel").role,"event")
         self.assertEqual(notifications().get("buzz","message").role,"notification")
+        with self.assertRaises(KeyError): default_registry().get("github","missing")
+        with self.assertRaises(KeyError): notifications().get("buzz","missing")
     def test_crud_revision_reservation_and_acceptance(self):
         with tempfile.TemporaryDirectory() as d:
             s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); item=s.create("one",e,n)
             self.assertTrue(s.reserve_one(item["id"],"occ-1")); self.assertFalse(s.reserve_one(item["id"],"occ-2"))
             with self.assertRaises(Conflict): s.transition(item["id"],"pause",99)
             s.accepted(item["id"],"occ-1","delivery-1"); self.assertEqual(s.get(item["id"])["state"],"finished"); s.close()
+    def test_failed_attempt_does_not_consume_one_and_all_continues(self):
+        with tempfile.TemporaryDirectory() as d:
+            s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs()
+            one=s.create("one",e,n); self.assertTrue(s.reserve_one(one["id"],"failed")); s.record_attempt(one["id"],"failed",1,"retryable","timeout")
+            self.assertEqual(s.get(one["id"])["state"],"active"); self.assertFalse(s.reserve_one(one["id"],"later"))
+            all_sub=s.create("all",e,n); s.accepted(all_sub["id"],"a","d-a"); self.assertEqual(s.get(all_sub["id"])["state"],"active"); s.close()

@@ -20,7 +20,11 @@ def main(argv=None):
     try:
         if a.action=="create":
             e=json.loads(a.event); n=json.loads(a.notification)
-            item=store.create(a.frequency,EventTriggerSpec(e["provider"],e["event_type"],e["schema_version"],e["match"]),NotificationAddressSpec(n["provider"],n["notification_type"],n["schema_version"],n["address"]))
+            event_provider=event_registry().get(e["provider"],e["event_type"])
+            notification_provider=notification_registry().get(n["provider"],n["notification_type"])
+            match=event_provider.validate_config(e["match"],e["schema_version"])
+            address=notification_provider.validate_config(n["address"],n["schema_version"])
+            item=store.create(a.frequency,EventTriggerSpec(e["provider"],e["event_type"],e["schema_version"],match),NotificationAddressSpec(n["provider"],n["notification_type"],n["schema_version"],address))
         elif a.action=="list": item=store.list()
         elif a.action in ("get","status"): item=store.get(a.id)
         elif a.action in ("pause","resume","delete"): item=store.transition(a.id,a.action,a.if_revision)

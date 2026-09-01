@@ -21,6 +21,12 @@ class _Descriptor(EventProvider):
     def __init__(self, provider: str, capability: str):
         self.provider, self.capability = provider, capability
     def describe(self): return {"role": "event", "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1]}
+    def validate_config(self, config, version):
+        if version != 1 or not isinstance(config, dict): raise ValueError("unsupported event schema")
+        allowed = {"channel": {"channel","author","kinds"}, "check": {"repository","check_name","pull_request"},"exited": {"pid","start_identity","stdout_path","stderr_path"}}
+        unknown=set(config)-allowed[self.capability]
+        if unknown: raise ValueError("unknown event match fields: "+",".join(sorted(unknown)))
+        return dict(config)
     def observe(self, cursor=None): return ()
 
 class EventRegistry:
