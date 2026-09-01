@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from typing import Any, Callable, Iterable
 from .interface import EventOccurrence
@@ -71,5 +72,8 @@ class BuzzChannelEventsProvider:
         result = self._runner(["buzz", "channels", "get", "--channel", channel], check=True, capture_output=True, text=True)
         value = json.loads(result.stdout)
         actual = value.get("community") or value.get("community_id") if isinstance(value, dict) else None
+        actual = actual or os.environ.get("BUZZ_COMMUNITY_ID")
+        if actual is None:
+            raise ValueError("Buzz CLI omitted community; BUZZ_COMMUNITY_ID is required")
         if actual != self.config.get("community"):
             raise ValueError("Buzz channel community does not match configured community")

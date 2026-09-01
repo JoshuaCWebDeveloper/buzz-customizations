@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from enotify.providers.notifications.buzz import BuzzMessageProvider
 
@@ -46,3 +47,12 @@ class BuzzNotificationTests(unittest.TestCase):
             return result
         result = BuzzMessageProvider({"community": "c", "channel": "ch"}, run).send("hello", "key")
         self.assertEqual(result.outcome, "permanent")
+
+    def test_send_uses_environment_community_when_cli_omits_it(self):
+        def run(command, **kwargs):
+            result = Result()
+            result.stdout = json.dumps({"channel_id": "ch"}) if "channels" in command else json.dumps({"event_id": "receipt"})
+            return result
+        with patch.dict("os.environ", {"BUZZ_COMMUNITY_ID": "c"}):
+            result = BuzzMessageProvider({"community": "c", "channel": "ch"}, run).send("hello", "key")
+        self.assertEqual(result.outcome, "accepted")

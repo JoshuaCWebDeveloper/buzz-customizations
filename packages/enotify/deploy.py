@@ -77,6 +77,7 @@ def stage_release(release_dir: Path) -> None:
     temporary = Path(tempfile.mkdtemp(prefix=f".{release_dir.name}.", dir=parent))
     try:
         shutil.copytree(source / "enotify", temporary / "enotify")
+        shutil.copy2(source / "enotify.py", temporary / "enotify.py")
         shutil.copy2(source / "enotify-worker.py", temporary / "enotify-worker.py")
         shutil.copytree(source / "migrations", temporary / "migrations")
         backup = release_dir.with_name(release_dir.name + ".previous")
@@ -86,7 +87,9 @@ def stage_release(release_dir: Path) -> None:
             os.replace(release_dir, backup)
         os.replace(temporary, release_dir)
         for path in release_dir.rglob("*"):
-            if path.is_file():
+            if path.is_dir():
+                path.chmod(0o755)
+            elif path.is_file():
                 path.chmod(0o644)
         release_dir.chmod(0o755)
     finally:
