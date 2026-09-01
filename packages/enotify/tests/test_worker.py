@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from enotify.models import EventTriggerSpec
 from enotify.providers.events import EventOccurrence
 from enotify.providers.notifications import SendResult
 from enotify.storage import Store
@@ -216,6 +217,39 @@ class WorkerTests(unittest.TestCase):
             store.advance_typing_consumer(subscription["id"], provider.source, pending[0].cursor, pending[0].occurrence_id)
             after_restart = store.typing_consumer_occurrences(subscription["id"], provider.source)
             self.assertEqual([item.payload["direction"] for item in after_restart], ["started"])
+            store.close()
+
+    def test_shared_live_stream_fanout_delivers_distinct_ttl_projections_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            notification = specs()[1]
+            base = {"community": "c", "channel": "ch", "author": "a"}
+            event8 = EventTriggerSpec("buzz", "typing-transitions", 1, {**base, "ttl": 8})
+            event12 = EventTriggerSpec("buzz", "typing-transitions", 1, {**base, "ttl": 12})
+            first = store.create("all", event8, notification)
+            second = store.create("all", event12, notification)
+
+            class SharedStream:
+                def poll(self):
+                    return [{"id": "live", "kind": 20002, "pubkey": "a", "created_at": 100, "tags": [["h", "ch"]]}]
+
+            shared = SharedStream()
+            def run(command, **kwargs):
+                class Result: pass
+                result = Result()
+                result.stdout = json.dumps({"community": "c"} if "channels" in command else [])
+                return result
+
+            for subscription, ttl in ((first, 8), (second, 12)):
+                match = {**base, "ttl": ttl}
+                provider = BuzzTypingTransitionsProvider(run, match, stream=shared)
+                Worker(store, provider, FakeNotifications([SendResult.accepted(str(ttl))]), clock=lambda: 100).process(
+                    subscription, lambda occurrence: occurrence.payload["direction"]
+                )
+
+            rows = store.db.execute("SELECT source,COUNT(*) AS count FROM event_occurrences GROUP BY source").fetchall()
+            self.assertEqual(sorted(row["count"] for row in rows), [1, 1])
+            self.assertEqual(store.db.execute("SELECT COUNT(*) FROM delivery_reservations").fetchone()[0], 2)
             store.close()
 
     def test_notification_only_update_keeps_typing_consumer_eligible(self):

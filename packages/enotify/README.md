@@ -90,5 +90,13 @@ transitions; refresh ticks extend the semantic deadline without emitting.
 
 Expiry is emitted at `last_tick_created_at + ttl`, even when no new relay
 event arrives. The provider exposes a due deadline to the worker scheduler;
-observation never blocks waiting for expiry. `buzz/channel-events` is
-unchanged.
+observation never blocks waiting for expiry. Typing ticks are ephemeral: the
+provider supervises `buzz-server events subscribe --community ... --filter
+'{"kinds":[20002],"authors":[...],"#h":[...]}'` as JSONL and consumes
+`event` records through the initial `eose`. It never falls back to
+`buzz messages get`. One bounded, reconnecting stream is shared per
+community/channel/author; TTL-specific projections remain isolated in the
+durable store. Reconnects use the Buzz Server managed overlap and do not
+synthesize stops; persisted deadlines continue to drive expiry. The default
+owner identity is resolved by Buzz Server, so no additional enotify identity
+setting is required. `buzz/channel-events` is unchanged.
