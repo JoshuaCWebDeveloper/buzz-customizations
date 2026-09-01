@@ -382,6 +382,15 @@ class Store:
             db.execute("DELETE FROM delivery_leases WHERE expires_at<=?", (now_epoch(),))
             return len(expired)
 
+    def heartbeat(self, reservation_id: str, owner: str, ttl_seconds: int = 300) -> bool:
+        with self._transaction() as db:
+            cursor = db.execute(
+                """UPDATE delivery_leases SET expires_at=?,updated_at=?
+                   WHERE reservation_id=? AND owner=? AND expires_at>?""",
+                (now_epoch() + ttl_seconds, now(), reservation_id, owner, now_epoch()),
+            )
+            return cursor.rowcount == 1
+
     def accepted(self, reservation_id: str, attempt: int, receipt: str) -> str:
         with self._transaction() as db:
             row = db.execute(

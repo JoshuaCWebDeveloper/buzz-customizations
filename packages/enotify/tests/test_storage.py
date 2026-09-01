@@ -90,3 +90,19 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(store.get(subscription["id"])["state"], "paused")
             self.assertEqual(paused["revision"], store.get(subscription["id"])["revision"])
             store.close()
+
+    def test_expired_lease_is_reclaimed_for_same_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open_store(directory)
+            event, notification = specs()
+            subscription = store.create("one", event, notification)
+            occurrence = store.record_occurrence(self.occurrence())
+            reservation = store.reserve(subscription["id"], occurrence["id"])
+            first = store.claim(reservation["id"], "worker-one", ttl_seconds=-1)
+            self.assertIsNotNone(first)
+            self.assertEqual(store.reclaim_expired(), 1)
+            second = store.claim(reservation["id"], "worker-two")
+            self.assertEqual(second["attempt"], 2)
+            self.assertTrue(store.heartbeat(reservation["id"], "worker-two"))
+            self.assertFalse(store.heartbeat(reservation["id"], "worker-one"))
+            store.close()
