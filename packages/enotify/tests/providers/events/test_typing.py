@@ -97,7 +97,8 @@ class TypingProviderTests(unittest.TestCase):
         stream.community, stream.channel, stream.author = "community", "channel", "author"
         stream._config = {"executable": "/opt/buzz-server/current/buzz-events"}
         command = stream.command
-        self.assertEqual(command[:3], ["/opt/buzz-server/current/buzz-events", "subscribe", "--community"])
+        self.assertEqual(command[:2], ["/opt/buzz-server/current/buzz-events", "subscribe"])
+        self.assertNotIn("--community", command)
         self.assertNotIn("messages", command)
         self.assertEqual(json.loads(command[-1]), {"kinds": [20002], "authors": ["author"], "#h": ["channel"]})
 
