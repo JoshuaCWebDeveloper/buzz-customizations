@@ -273,11 +273,16 @@ class Store:
                 (occurrence.provider, occurrence.source, occurrence.occurrence_id),
             ).fetchone()
             if occurrence.cursor is not None:
-                db.execute(
-                    """INSERT INTO provider_checkpoints VALUES(?,?,?,?)
-                       ON CONFLICT(provider,source) DO UPDATE SET cursor=excluded.cursor,updated_at=excluded.updated_at""",
-                    (occurrence.provider, occurrence.source, occurrence.cursor, now()),
-                )
+                checkpoint = db.execute(
+                    "SELECT cursor FROM provider_checkpoints WHERE provider=? AND source=?",
+                    (occurrence.provider, occurrence.source),
+                ).fetchone()
+                if checkpoint is None or str(occurrence.cursor) >= str(checkpoint["cursor"]):
+                    db.execute(
+                        """INSERT INTO provider_checkpoints VALUES(?,?,?,?)
+                           ON CONFLICT(provider,source) DO UPDATE SET cursor=excluded.cursor,updated_at=excluded.updated_at""",
+                        (occurrence.provider, occurrence.source, occurrence.cursor, now()),
+                    )
         return dict(row)
 
     def checkpoint(self, provider: str, source: str) -> str | None:

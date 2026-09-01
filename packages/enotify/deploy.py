@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import pwd
 import shutil
 import subprocess
 import tempfile
@@ -15,6 +16,13 @@ UNIT_NAME = "enotify.service"
 
 def install(state_dir: Path) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.chmod(0o770)
+    try:
+        account = pwd.getpwnam("enotify")
+    except KeyError:
+        account = None
+    if account is not None and os.geteuid() == 0:
+        os.chown(state_dir, account.pw_uid, account.pw_gid)
     marker = state_dir / MARKER
     marker.write_text(
         "Managed by packages/enotify/deploy.py.\n",
@@ -30,6 +38,7 @@ After=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-{state}/enotify.env
+Environment=ENOTIFY_DB={state}/enotify.db
 User=enotify
 Group=enotify
 WorkingDirectory={root}
@@ -78,7 +87,7 @@ def stage_release(release_dir: Path) -> None:
         os.replace(temporary, release_dir)
         for path in release_dir.rglob("*"):
             if path.is_file():
-                path.chmod(0o640)
+                path.chmod(0o644)
         release_dir.chmod(0o755)
     finally:
         if temporary.exists():
@@ -126,10 +135,12 @@ def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run, 
         return
     if action == "rollback":
         backup = destination.with_suffix(".service.bak")
-        if not backup.exists():
+        if not backup.exists() or not release_dir.with_name(release_dir.name + ".previous").exists():
             raise RuntimeError("no previous enotify service unit to roll back")
+        service_action("stop", unit_dir, runner)
         rollback_release(release_dir)
         destination.write_bytes(backup.read_bytes())
+        backup.unlink()
         service_action("daemon-reload", unit_dir, runner)
         service_action("restart", unit_dir, runner)
         return
