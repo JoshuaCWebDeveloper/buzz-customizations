@@ -28,6 +28,7 @@ class DeployTests(unittest.TestCase):
             install(state)
             self.assertTrue((release / "enotify-worker.py").exists())
             self.assertIn(str(release / "enotify-worker.py"), unit(state, release))
+            self.assertIn(f"ENOTIFY_DB={state / 'enotify.db'}", unit(state, release))
             self.assertNotIn("BUZZ_PRIVATE_KEY", unit(state, release))
 
     def test_release_rollback_restores_previous_tree(self):

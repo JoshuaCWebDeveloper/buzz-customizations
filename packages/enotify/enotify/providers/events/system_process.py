@@ -43,8 +43,8 @@ class SystemProcessExitedProvider:
         if stat.exists():
             try:
                 text = stat.read_text(encoding="utf-8")
-            except OSError:
-                return ()
+            except OSError as exc:
+                raise RuntimeError("process stat is unreadable") from exc
             closing = text.rfind(")")
             fields = text[closing + 2:].split() if closing >= 0 else []
             if len(fields) > 19 and fields[19] == identity:
@@ -57,7 +57,8 @@ class SystemProcessExitedProvider:
             path = self.config.get(field)
             if path and Path(path).is_file():
                 try:
-                    data = Path(path).read_bytes()
+                    with Path(path).open("rb") as handle:
+                        data = handle.read(1024 * 1024 + 1)
                 except OSError:
                     payload[field] = {"path": path, "available": False, "error": "unreadable"}
                     continue

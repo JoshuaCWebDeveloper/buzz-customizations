@@ -78,7 +78,7 @@ class GitHubCheckProvider:
                 )
                 identity = f"{run_id}:{transition}"
                 result.append(EventOccurrence(self.provider, repository, identity, str(stamp), str(stamp), run))
-        return result
+        return sorted(result, key=lambda occurrence: occurrence.observed_at)
 
     @staticmethod
     def _matches(run: dict[str, Any], wanted: dict[str, Any], pull_number: int | None) -> bool:
