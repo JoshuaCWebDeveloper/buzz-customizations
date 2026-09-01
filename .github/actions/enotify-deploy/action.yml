@@ -1,0 +1,18 @@
+name: enotify deploy
+description: Install or operate the enotify worker using a secret-reference environment file.
+inputs:
+  action:
+    description: install, start, status, restart, rollback, or undeploy
+    required: true
+  state-dir:
+    description: Persistent state directory on the target host
+    required: true
+  unit-dir:
+    description: systemd unit directory on the target host
+    required: false
+    default: /etc/systemd/system
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: python3 packages/enotify/deploy.py "${{ inputs.action }}" --state-dir "${{ inputs.state-dir }}" --unit-dir "${{ inputs.unit-dir }}"

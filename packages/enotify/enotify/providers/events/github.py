@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable
+import json
+import os
+from urllib.request import Request, urlopen
+from typing import Any, Callable, Iterable
 from .interface import EventOccurrence
 from .schema import nonempty_string, object_config, predicate
 
@@ -12,6 +15,10 @@ class GitHubCheckProvider:
     role = "event"
     provider = "github"
     capability = "check"
+
+    def __init__(self, fetch: Callable[[str], Any] | None = None, config: dict[str, Any] | None = None):
+        self._fetch = fetch or self._request
+        self.config = dict(config or {})
 
     def describe(self) -> dict[str, Any]:
         return {"role": self.role, "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1]}
@@ -41,4 +48,52 @@ class GitHubCheckProvider:
         return value
 
     def observe(self, cursor: str | None = None) -> Iterable[EventOccurrence]:
-        return ()
+        repository = self.config.get("repository")
+        if not repository:
+            return ()
+        commits = self._fetch(f"https://api.github.com/repos/{repository}/commits?per_page=20")
+        if not isinstance(commits, list):
+            raise ValueError("GitHub commits response must be an array")
+        wanted = self.config.get("check", {})
+        pull_number = (self.config.get("pull_request") or {}).get("number")
+        result: list[EventOccurrence] = []
+        for commit in commits:
+            sha = commit.get("sha") if isinstance(commit, dict) else None
+            if not isinstance(sha, str):
+                continue
+            runs = self._fetch(f"https://api.github.com/repos/{repository}/commits/{sha}/check-runs?per_page=100")
+            for run in runs.get("check_runs", []) if isinstance(runs, dict) else []:
+                if not isinstance(run, dict) or not self._matches(run, wanted, pull_number):
+                    continue
+                identity = str(run.get("id") or f"{sha}:{run.get('name')}:{run.get('started_at')}")
+                stamp = run.get("completed_at") or run.get("started_at") or run.get("updated_at") or ""
+                result.append(EventOccurrence(self.provider, repository, identity, str(stamp), identity, run))
+        return result
+
+    @staticmethod
+    def _matches(run: dict[str, Any], wanted: dict[str, Any], pull_number: int | None) -> bool:
+        values = {
+            "name": run.get("name"), "app": (run.get("app") or {}).get("slug") if isinstance(run.get("app"), dict) else run.get("app"),
+            "status": run.get("status"), "conclusion": run.get("conclusion"),
+        }
+        for key, predicate_value in wanted.items():
+            actual = values.get(key)
+            if "equals" in predicate_value and actual != predicate_value["equals"]:
+                return False
+            if "in" in predicate_value and actual not in predicate_value["in"]:
+                return False
+        if pull_number is not None:
+            prs = run.get("pull_requests")
+            if not isinstance(prs, list) or not any(isinstance(pr, dict) and pr.get("number") == pull_number for pr in prs):
+                return False
+        return True
+
+    @staticmethod
+    def _request(url: str) -> Any:
+        headers = {"Accept": "application/vnd.github+json", "User-Agent": "enotify"}
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = Request(url, headers=headers)
+        with urlopen(request, timeout=20) as response:
+            return json.load(response)

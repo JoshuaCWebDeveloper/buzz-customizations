@@ -1,0 +1,26 @@
+name: enotify production deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Deployment action
+        required: true
+        type: choice
+        options: [install, start, status, restart, rollback, undeploy]
+      state_dir:
+        description: Persistent state directory on the deployment runner/host
+        required: true
+        default: /var/lib/enotify
+
+jobs:
+  deploy:
+    # Bind this workflow to an explicitly approved production environment.
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/enotify-deploy
+        with:
+          action: ${{ inputs.action }}
+          state-dir: ${{ inputs.state_dir }}

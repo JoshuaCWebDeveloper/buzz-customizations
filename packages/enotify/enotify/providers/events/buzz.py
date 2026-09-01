@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+import json
+import subprocess
+from typing import Any, Callable, Iterable
 from .interface import EventOccurrence
 from .schema import nonempty_string, object_config
 
@@ -9,6 +11,10 @@ class BuzzChannelEventsProvider:
     role = "event"
     provider = "buzz"
     capability = "channel-events"
+
+    def __init__(self, runner: Callable[..., Any] | None = None, config: dict[str, Any] | None = None):
+        self._runner = runner or subprocess.run
+        self.config = dict(config or {})
 
     def describe(self) -> dict[str, Any]:
         return {"role": self.role, "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1]}
@@ -24,4 +30,36 @@ class BuzzChannelEventsProvider:
         return value
 
     def observe(self, cursor: str | None = None) -> Iterable[EventOccurrence]:
-        return ()
+        channel = self.config.get("channel")
+        if not channel:
+            return ()
+        since = 0
+        if cursor is not None:
+            try:
+                since = max(0, int(cursor) - 1)  # overlap protects cursor boundaries
+            except ValueError:
+                since = 0
+        command = ["buzz", "messages", "get", "--channel", channel]
+        if since:
+            command += ["--since", str(since)]
+        result = self._runner(command, check=True, capture_output=True, text=True)
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list):
+            raise ValueError("buzz messages get returned a non-array")
+        author = self.config.get("author")
+        kind = self.config.get("kind")
+        occurrences = []
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+                continue
+            if author is not None and row.get("pubkey") != author:
+                continue
+            if kind is not None and row.get("kind") != kind:
+                continue
+            created = row.get("created_at")
+            if not isinstance(created, int):
+                continue
+            occurrences.append(EventOccurrence(
+                self.provider, channel, row["id"], str(created), str(created), row
+            ))
+        return occurrences

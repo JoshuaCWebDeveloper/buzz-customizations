@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Iterable
 from .interface import EventOccurrence
 from .schema import nonempty_string, object_config
@@ -9,6 +10,10 @@ class SystemProcessExitedProvider:
     role = "event"
     provider = "system-process"
     capability = "exited"
+
+    def __init__(self, config: dict[str, Any] | None = None, proc_root: Path = Path("/proc")):
+        self.config = dict(config or {})
+        self.proc_root = Path(proc_root)
 
     def describe(self) -> dict[str, Any]:
         return {"role": self.role, "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1]}
@@ -30,4 +35,19 @@ class SystemProcessExitedProvider:
         return value
 
     def observe(self, cursor: str | None = None) -> Iterable[EventOccurrence]:
-        return ()
+        pid = self.config.get("pid")
+        identity = self.config.get("start_identity")
+        if not isinstance(pid, int) or not isinstance(identity, str):
+            return ()
+        stat = self.proc_root / str(pid) / "stat"
+        if stat.exists():
+            fields = stat.read_text(encoding="utf-8").split()
+            if len(fields) > 21 and fields[21] == identity:
+                return ()
+        occurrence_id = f"{pid}:{identity}"
+        payload: dict[str, Any] = {"pid": pid, "start_identity": identity}
+        for field in ("stdout_path", "stderr_path", "status_path"):
+            path = self.config.get(field)
+            if path and Path(path).is_file():
+                payload[field] = Path(path).read_text(encoding="utf-8", errors="replace")
+        return (EventOccurrence(self.provider, str(pid), occurrence_id, "", occurrence_id, payload),)
