@@ -152,3 +152,29 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(store.db.execute("SELECT COUNT(*) FROM event_occurrences").fetchone()[0], 1)
             self.assertEqual(store.db.execute("SELECT COUNT(*) FROM delivery_reservations").fetchone()[0], 2)
             store.close()
+
+    def test_consumer_boundary_excludes_late_history_and_filters_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            base = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
+            started = event.__class__("buzz", "typing-transitions", 1, {**base, "direction": "started"})
+            stopped = event.__class__("buzz", "typing-transitions", 1, {**base, "direction": "stopped"})
+            first = store.create("all", started, notification)
+            rows = [{"id": "tick-1", "kind": 20002, "pubkey": "a", "created_at": 100, "tags": [["h", "ch"]]}]
+            def run(command, **kwargs):
+                class Result: pass
+                result = Result(); result.stdout = json.dumps({"community": "c"} if "channels" in command else rows); return result
+            sender = FakeNotifications([SendResult.accepted("start")])
+            Worker(store, BuzzTypingTransitionsProvider(run, base), sender, clock=lambda: 100).process(first, lambda occurrence: occurrence.payload["direction"])
+            late = store.create("all", stopped, notification)
+            late_sender = FakeNotifications([])
+            Worker(store, BuzzTypingTransitionsProvider(run, base), late_sender, clock=lambda: 100).process(late, lambda occurrence: occurrence.payload["direction"])
+            self.assertEqual(late_sender.keys, [])
+            # A due stop is consumed by the opposite filter once, then the
+            # consumer cursor prevents rescanning it on the next poll.
+            stop_sender = FakeNotifications([SendResult.accepted("stop")])
+            Worker(store, BuzzTypingTransitionsProvider(run, base), stop_sender, clock=lambda: 108).process(late, lambda occurrence: occurrence.payload["direction"])
+            Worker(store, BuzzTypingTransitionsProvider(run, base), stop_sender, clock=lambda: 108).process(late, lambda occurrence: occurrence.payload["direction"])
+            self.assertEqual(len(stop_sender.keys), 1)
+            store.close()
