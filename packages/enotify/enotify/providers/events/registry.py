@@ -28,7 +28,8 @@ class EventRegistry:
 
 def default_registry() -> EventRegistry:
     from .buzz import BuzzChannelEventsProvider
+    from .typing import BuzzTypingTransitionsProvider
     from .github import GitHubCheckProvider
     from .system_process import SystemProcessExitedProvider
 
-    return EventRegistry((BuzzChannelEventsProvider(), GitHubCheckProvider(), SystemProcessExitedProvider()))
+    return EventRegistry((BuzzChannelEventsProvider(), BuzzTypingTransitionsProvider(), GitHubCheckProvider(), SystemProcessExitedProvider()))

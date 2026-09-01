@@ -65,3 +65,29 @@ npx nx lint enotify
 ```
 
 The tests cover strict provider schemas, role separation, repeatable migrations, optimistic revisions, redaction/idempotent replay, concurrent single-winner reservation, lease recovery, late results, `one` retry/exhaustion/release, and `all` continuation.
+# Buzz typing transition events
+
+The event provider `buzz/typing-transitions` is a version-1, role-safe event
+source for one community/channel/author. Its optional `ttl` is a positive
+integer and defaults to 8 seconds. It emits only `started` and `stopped`
+transitions; refresh ticks extend the semantic deadline without emitting.
+
+```json
+{
+  "provider": "buzz",
+  "event_type": "typing-transitions",
+  "schema_version": 1,
+  "match": {
+    "community": "community-id",
+    "channel": "channel-id",
+    "author": "author-pubkey",
+    "ttl": 8,
+    "direction": "started"
+  }
+}
+```
+
+Expiry is emitted at `last_tick_created_at + ttl`, even when no new relay
+event arrives. The provider exposes a due deadline to the worker scheduler;
+observation never blocks waiting for expiry. `buzz/channel-events` is
+unchanged.

@@ -26,21 +26,42 @@ class Worker:
         self.max_attempts = max_attempts
         self.owner = owner or f"worker-{uuid.uuid4()}"
 
+    def next_due(self) -> int | None:
+        """Return the provider deadline for a shared non-blocking scheduler."""
+        due = getattr(self.event_provider, "next_due", None)
+        return due() if due is not None else None
+
     def process(self, subscription: dict, render: Callable[[EventOccurrence], str]) -> None:
         match = subscription["event_trigger"].get("match", {})
-        source = match.get("channel") or match.get("repository") or str(match.get("pid", "default"))
+        source = getattr(self.event_provider, "source", None) or match.get("channel") or match.get("repository") or str(match.get("pid", "default"))
+        restore = getattr(self.event_provider, "restore", None)
+        snapshot = self.store.typing_projection(self.event_provider.provider, source)
+        if restore is not None and snapshot is not None:
+            restore(snapshot)
         cursor = self.store.checkpoint(self.event_provider.provider, source)
+        # Due transitions are advanced before relay input, and never by a
+        # provider blocking in observe(). Providers without the optional
+        # boundary retain the original behavior.
+        advance = getattr(self.event_provider, "advance", None)
+        if advance is not None:
+            for occurrence in advance(int(__import__("time").time())):
+                self._process_occurrence(subscription, occurrence, render)
         for occurrence in self.event_provider.observe(cursor):
-            current = self.store.get(subscription["id"])
-            if current["state"] != "active":
-                return
-            occurrence_row = self.store.record_occurrence(occurrence)
-            reservation = self.store.reserve(subscription["id"], occurrence_row["id"])
-            if reservation is None:
-                # A one-subscription already has a selected occurrence. Never
-                # silently advance to a later event.
-                continue
-            self._deliver(reservation, occurrence, render)
+            self._process_occurrence(subscription, occurrence, render)
+
+    def _process_occurrence(self, subscription: dict, occurrence: EventOccurrence,
+                            render: Callable[[EventOccurrence], str]) -> None:
+        current = self.store.get(subscription["id"])
+        if current["state"] != "active":
+            return
+        snapshot = getattr(self.event_provider, "snapshot", None)
+        occurrence_row = self.store.record_occurrence(occurrence, snapshot() if snapshot else None)
+        reservation = self.store.reserve(subscription["id"], occurrence_row["id"])
+        if reservation is None:
+            # A one-subscription already has a selected occurrence. Never
+            # silently advance to a later event.
+            return
+        self._deliver(reservation, occurrence, render)
 
     def retry(self, reservation_id: str, occurrence: EventOccurrence, render: Callable[[EventOccurrence], str]) -> bool:
         reservation = self.store.reservation(reservation_id)

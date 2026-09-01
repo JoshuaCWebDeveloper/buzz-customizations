@@ -251,7 +251,7 @@ class Store:
             )
             return json.loads(encoded)
 
-    def record_occurrence(self, occurrence: EventOccurrence) -> dict[str, Any]:
+    def record_occurrence(self, occurrence: EventOccurrence, projection: dict[str, Any] | None = None) -> dict[str, Any]:
         row_id = str(uuid.uuid4())
         with self._transaction() as db:
             db.execute(
@@ -283,6 +283,20 @@ class Store:
                            ON CONFLICT(provider,source) DO UPDATE SET cursor=excluded.cursor,updated_at=excluded.updated_at""",
                         (occurrence.provider, occurrence.source, occurrence.cursor, now()),
                     )
+            if projection is not None:
+                db.execute(
+                    """INSERT INTO typing_projections
+                       (provider,source,active,last_tick_at,last_tick_id,expires_at,cursor,last_transition_id,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(provider,source) DO UPDATE SET active=excluded.active,
+                       last_tick_at=excluded.last_tick_at,last_tick_id=excluded.last_tick_id,
+                       expires_at=excluded.expires_at,cursor=excluded.cursor,
+                       last_transition_id=COALESCE(excluded.last_transition_id,typing_projections.last_transition_id),
+                       updated_at=excluded.updated_at""",
+                    (occurrence.provider, occurrence.source, int(projection["active"]), projection.get("last_tick_at"),
+                     projection.get("last_tick_id"), projection.get("expires_at"), projection.get("cursor"),
+                     occurrence.occurrence_id, now()),
+                )
         return dict(row)
 
     def checkpoint(self, provider: str, source: str) -> str | None:
@@ -291,6 +305,29 @@ class Store:
             (provider, source),
         ).fetchone()
         return row["cursor"] if row else None
+
+    def typing_projection(self, provider: str, source: str) -> dict[str, Any] | None:
+        row = self._connection().execute(
+            "SELECT * FROM typing_projections WHERE provider=? AND source=?", (provider, source)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_typing_projection(self, provider: str, source: str, state: dict[str, Any],
+                               cursor: str | None = None, last_transition_id: str | None = None) -> None:
+        """Persist the provider projection in one CAS-style replacement."""
+        with self._transaction() as db:
+            db.execute(
+                """INSERT INTO typing_projections
+                   (provider,source,active,last_tick_at,last_tick_id,expires_at,cursor,last_transition_id,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(provider,source) DO UPDATE SET
+                     active=excluded.active,last_tick_at=excluded.last_tick_at,last_tick_id=excluded.last_tick_id,
+                     expires_at=excluded.expires_at,cursor=COALESCE(excluded.cursor,typing_projections.cursor),
+                     last_transition_id=COALESCE(excluded.last_transition_id,typing_projections.last_transition_id),
+                     updated_at=excluded.updated_at""",
+                (provider, source, int(state["active"]), state.get("last_tick_at"), state.get("last_tick_id"),
+                 state.get("expires_at"), cursor, last_transition_id, now()),
+            )
 
     def reserve(self, subscription_id: str, occurrence_row_id: str) -> dict[str, Any] | None:
         with self._transaction() as db:
