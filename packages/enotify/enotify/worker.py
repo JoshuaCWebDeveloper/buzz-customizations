@@ -27,7 +27,10 @@ class Worker:
         self.owner = owner or f"worker-{uuid.uuid4()}"
 
     def process(self, subscription: dict, render: Callable[[EventOccurrence], str]) -> None:
-        for occurrence in self.event_provider.observe(None):
+        match = subscription["event_trigger"].get("match", {})
+        source = match.get("channel") or match.get("repository") or str(match.get("pid", "default"))
+        cursor = self.store.checkpoint(self.event_provider.provider, source)
+        for occurrence in self.event_provider.observe(cursor):
             current = self.store.get(subscription["id"])
             if current["state"] != "active":
                 return

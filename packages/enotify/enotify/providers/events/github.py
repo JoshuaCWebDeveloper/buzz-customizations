@@ -77,7 +77,7 @@ class GitHubCheckProvider:
                     sort_keys=True, separators=(",", ":")
                 )
                 identity = f"{run_id}:{transition}"
-                result.append(EventOccurrence(self.provider, repository, identity, str(stamp), identity, run))
+                result.append(EventOccurrence(self.provider, repository, identity, str(stamp), str(stamp), run))
         return result
 
     @staticmethod

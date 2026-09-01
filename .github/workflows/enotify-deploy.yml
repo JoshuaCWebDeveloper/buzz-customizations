@@ -12,6 +12,10 @@ on:
         description: Persistent state directory on the deployment runner/host
         required: true
         default: /var/lib/enotify
+      release_dir:
+        description: Absolute durable release directory on the production host
+        required: true
+        default: /opt/enotify
 
 jobs:
   deploy:
@@ -24,3 +28,4 @@ jobs:
         with:
           action: ${{ inputs.action }}
           state-dir: ${{ inputs.state_dir }}
+          release-dir: ${{ inputs.release_dir }}

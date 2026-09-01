@@ -280,6 +280,13 @@ class Store:
                 )
         return dict(row)
 
+    def checkpoint(self, provider: str, source: str) -> str | None:
+        row = self._connection().execute(
+            "SELECT cursor FROM provider_checkpoints WHERE provider=? AND source=?",
+            (provider, source),
+        ).fetchone()
+        return row["cursor"] if row else None
+
     def reserve(self, subscription_id: str, occurrence_row_id: str) -> dict[str, Any] | None:
         with self._transaction() as db:
             subscription = db.execute(

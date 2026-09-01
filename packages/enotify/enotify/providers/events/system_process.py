@@ -50,7 +50,7 @@ class SystemProcessExitedProvider:
             if len(fields) > 19 and fields[19] == identity:
                 return ()
             if len(fields) > 19 and fields[19] != identity:
-                return ()  # PID was reused; never report the old process as exited
+                return (EventOccurrence(self.provider, str(pid), f"{pid}:{identity}:pid_reused", "", f"pid_reused:{identity}", {"pid": pid, "start_identity": identity, "reason": "pid_reused"}),)
         occurrence_id = f"{pid}:{identity}"
         payload: dict[str, Any] = {"pid": pid, "start_identity": identity}
         for field in ("stdout_path", "stderr_path", "status_path"):

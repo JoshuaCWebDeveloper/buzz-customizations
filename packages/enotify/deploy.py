@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
 
 MARKER = "ENOTIFY_MANAGED"
 UNIT_NAME = "enotify.service"
@@ -51,15 +53,53 @@ def service_action(action: str, unit_dir: Path, runner=subprocess.run) -> None:
         raise RuntimeError(f"systemctl {action} failed")
 
 
+def _absolute_scoped(path: Path, label: str) -> Path:
+    path = path.resolve()
+    if not path.is_absolute() or str(path) in ("/", ""):
+        raise ValueError(f"{label} must be an absolute scoped path")
+    return path
+
+
+def stage_release(release_dir: Path) -> None:
+    release_dir = _absolute_scoped(release_dir, "release-dir")
+    source = Path(__file__).resolve().parent
+    parent = release_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{release_dir.name}.", dir=parent))
+    try:
+        shutil.copytree(source / "enotify", temporary / "enotify")
+        shutil.copy2(source / "enotify-worker.py", temporary / "enotify-worker.py")
+        shutil.copytree(source / "migrations", temporary / "migrations")
+        backup = release_dir.with_name(release_dir.name + ".previous")
+        if release_dir.exists():
+            if backup.exists():
+                shutil.rmtree(backup)
+            os.replace(release_dir, backup)
+        os.replace(temporary, release_dir)
+        for path in release_dir.rglob("*"):
+            if path.is_file():
+                path.chmod(0o640)
+        release_dir.chmod(0o755)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+
+
 def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run, release_dir: Path = Path("/opt/enotify")) -> None:
+    state_dir = _absolute_scoped(state_dir, "state-dir")
+    unit_dir = _absolute_scoped(unit_dir, "unit-dir")
+    release_dir = _absolute_scoped(release_dir, "release-dir")
     state_dir.mkdir(parents=True, exist_ok=True)
     destination = unit_dir / UNIT_NAME
     if action == "install":
         install(state_dir)
+        stage_release(release_dir)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             destination.with_suffix(".service.bak").write_bytes(destination.read_bytes())
-        destination.write_text(unit(state_dir, release_dir), encoding="utf-8")
+        temporary = destination.with_name(f".{destination.name}.tmp")
+        temporary.write_text(unit(state_dir, release_dir), encoding="utf-8")
+        os.replace(temporary, destination)
         service_action("daemon-reload", unit_dir, runner)
         service_action("enable", unit_dir, runner)
         service_action("start", unit_dir, runner)

@@ -11,6 +11,10 @@ inputs:
     description: systemd unit directory on the target host
     required: false
     default: /etc/systemd/system
+  release-dir:
+    description: Absolute durable release directory on the target host
+    required: false
+    default: /opt/enotify
 runs:
   using: composite
   steps:
@@ -19,4 +23,5 @@ runs:
         ENOTIFY_ACTION: ${{ inputs.action }}
         ENOTIFY_STATE_DIR: ${{ inputs.state-dir }}
         ENOTIFY_UNIT_DIR: ${{ inputs.unit-dir }}
-      run: python3 packages/enotify/deploy.py "$ENOTIFY_ACTION" --state-dir "$ENOTIFY_STATE_DIR" --unit-dir "$ENOTIFY_UNIT_DIR"
+        ENOTIFY_RELEASE_DIR: ${{ inputs.release-dir }}
+      run: python3 packages/enotify/deploy.py "$ENOTIFY_ACTION" --state-dir "$ENOTIFY_STATE_DIR" --unit-dir "$ENOTIFY_UNIT_DIR" --release-dir "$ENOTIFY_RELEASE_DIR"
