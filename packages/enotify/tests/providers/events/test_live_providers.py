@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from enotify.providers.events.buzz import BuzzChannelEventsProvider
 from enotify.providers.events.github import GitHubCheckProvider
@@ -24,6 +25,15 @@ class LiveProviderTests(unittest.TestCase):
         provider = BuzzChannelEventsProvider(run, {"community": "c", "channel": "ch", "author": "author", "kind": 1})
         self.assertEqual(list(provider.observe("10"))[0].occurrence_id, "a")
         self.assertEqual(calls[1][-4:], ["--kinds", "1", "--since", "9"])
+
+    def test_buzz_uses_configured_community_when_cli_omits_it(self):
+        def run(command, **kwargs):
+            result = Result()
+            result.stdout = json.dumps({"channel_id": "ch"} if "channels" in command else [])
+            return result
+        provider = BuzzChannelEventsProvider(run, {"community": "c", "channel": "ch"})
+        with patch.dict("os.environ", {"BUZZ_COMMUNITY_ID": "c"}):
+            self.assertEqual(tuple(provider.observe()), ())
 
     def test_github_matches_nested_check_and_pr(self):
         responses = {
