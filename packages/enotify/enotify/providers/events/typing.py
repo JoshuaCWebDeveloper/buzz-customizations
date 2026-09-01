@@ -173,7 +173,7 @@ class BuzzTypingLiveStream:
         filter_json = json.dumps({"kinds": [20002], "authors": [self.author], "#h": [self.channel]}, separators=(",", ":"))
         config = getattr(self, "_config", {})
         executable = getattr(self, "executable", None) or config.get("executable") or os.environ.get("ENOTIFY_BUZZ_EVENTS") or shutil.which("buzz-events") or "buzz-events"
-        return [executable, "subscribe", "--community", self.community, "--filter", filter_json]
+        return [executable, "subscribe", "--filter", filter_json]
 
     @staticmethod
     def _child_env() -> dict[str, str]:
@@ -308,7 +308,7 @@ class _RunnerTypingLiveStream:
         channel = self._config["channel"]
         filter_json = json.dumps({"kinds": [20002], "authors": [self._config["author"]], "#h": [channel]}, separators=(",", ":"))
         executable = self._config.get("executable") or os.environ.get("ENOTIFY_BUZZ_EVENTS") or shutil.which("buzz-events") or "buzz-events"
-        command = [executable, "subscribe", "--community", self._config["community"], "--filter", filter_json]
+        command = [executable, "subscribe", "--filter", filter_json]
         result = self._runner(command, check=True, capture_output=True, env=os.environ.copy(), text=True)
         text = getattr(result, "stdout", "")
         try:
