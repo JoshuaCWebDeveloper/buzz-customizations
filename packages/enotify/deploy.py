@@ -85,6 +85,26 @@ def stage_release(release_dir: Path) -> None:
             shutil.rmtree(temporary)
 
 
+def rollback_release(release_dir: Path) -> None:
+    release_dir = _absolute_scoped(release_dir, "release-dir")
+    backup = release_dir.with_name(release_dir.name + ".previous")
+    if not backup.exists():
+        raise RuntimeError("no previous enotify release to roll back")
+    displaced = release_dir.with_name(release_dir.name + ".rollback")
+    if displaced.exists():
+        shutil.rmtree(displaced)
+    if release_dir.exists():
+        os.replace(release_dir, displaced)
+    try:
+        os.replace(backup, release_dir)
+    except Exception:
+        if displaced.exists():
+            os.replace(displaced, release_dir)
+        raise
+    if displaced.exists():
+        shutil.rmtree(displaced)
+
+
 def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run, release_dir: Path = Path("/opt/enotify")) -> None:
     state_dir = _absolute_scoped(state_dir, "state-dir")
     unit_dir = _absolute_scoped(unit_dir, "unit-dir")
@@ -108,6 +128,7 @@ def deploy(action: str, state_dir: Path, unit_dir: Path, runner=subprocess.run, 
         backup = destination.with_suffix(".service.bak")
         if not backup.exists():
             raise RuntimeError("no previous enotify service unit to roll back")
+        rollback_release(release_dir)
         destination.write_bytes(backup.read_bytes())
         service_action("daemon-reload", unit_dir, runner)
         service_action("restart", unit_dir, runner)
