@@ -45,7 +45,8 @@ class BuzzTypingTransitionsProvider:
         self._runner = runner or subprocess.run
         self.config = self.validate_config(dict(config or {}), 1) if config is not None else {}
         self._clock = clock or (lambda: int(time.time()))
-        self._stream = stream
+        self._stream = stream or (_RunnerTypingLiveStream(self._runner, self.config)
+                                  if runner is not None else None)
 
     def describe(self) -> dict[str, Any]:
         return {"role": self.role, "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1]}
@@ -232,6 +233,35 @@ class BuzzTypingLiveStream:
     def close(self) -> None:
         self._reconnect()
         self._selector.close()
+
+
+class _RunnerTypingLiveStream:
+    """Callable-runner seam for tests; production uses ``BuzzTypingLiveStream``."""
+
+    def __init__(self, runner: Callable[..., Any], config: dict[str, Any]):
+        self._runner, self._config = runner, config
+
+    def poll(self) -> list[dict[str, Any]]:
+        channel = self._config["channel"]
+        filter_json = json.dumps({"kinds": [20002], "authors": [self._config["author"]], "#h": [channel]}, separators=(",", ":"))
+        command = ["buzz-server", "events", "subscribe", "--community", self._config["community"], "--filter", filter_json]
+        result = self._runner(command, check=True, capture_output=True, text=True)
+        text = getattr(result, "stdout", "")
+        try:
+            value = json.loads(text)
+        except (TypeError, ValueError):
+            value = []
+        if isinstance(value, list):
+            return [row for row in value if isinstance(row, dict)]
+        rows = []
+        for line in str(text).splitlines():
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict) and item.get("type") == "event" and isinstance(item.get("event"), dict):
+                rows.append(item["event"])
+        return rows
 
 
 class _TypingStreamPool:
