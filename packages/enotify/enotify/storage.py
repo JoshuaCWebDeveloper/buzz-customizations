@@ -40,8 +40,10 @@ class Store:
         if isinstance(value, list): return [self.redact(v) for v in value]
         return value
     def mutate_idempotent(self, key, operation, action):
+        if self.db.in_transaction: self.db.commit()
+        self.db.execute("BEGIN IMMEDIATE")
         row=self.db.execute("SELECT result_json FROM idempotency_keys WHERE key=?",(key,)).fetchone()
-        if row: return json.loads(row[0])
+        if row: self.db.commit(); return json.loads(row[0])
         result=self.redact(action()); encoded=json.dumps(result,sort_keys=True)
         self.db.execute("INSERT INTO idempotency_keys VALUES(?,?,?,?)",(key,operation,encoded,now())); self.db.commit(); return json.loads(encoded)
     def _row(self,row):
@@ -64,10 +66,31 @@ class Store:
         cur=self.db.execute("INSERT OR IGNORE INTO one_reservations VALUES(?,?,?,?,?)",(sid,occurrence_id,row["revision"],"reserved",now())); self.db.commit(); return cur.rowcount==1
     def record_attempt(self,sid,occurrence_id,attempt,outcome,error=None):
         self.db.execute("INSERT OR IGNORE INTO notification_attempts VALUES(?,?,?,?,?,?,?)",(sid,occurrence_id,attempt,f"{sid}/{occurrence_id}",outcome,error,now())); self.db.commit()
+    def claim(self,sid,occurrence_id,revision,attempt,ttl_seconds=300):
+        self.db.execute("BEGIN IMMEDIATE")
+        sub=self.db.execute("SELECT state,revision,frequency FROM subscriptions WHERE id=?",(sid,)).fetchone()
+        occurrence=self.db.execute("SELECT 1 FROM occurrences WHERE id=?",(occurrence_id,)).fetchone()
+        if not sub or sub["state"]!="active" or sub["revision"]!=revision or not occurrence:
+            self.db.rollback(); return False
+        if sub["frequency"]=="one":
+            reservation=self.db.execute("SELECT state,revision FROM one_reservations WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)).fetchone()
+            if not reservation or reservation["state"]!="reserved" or reservation["revision"]!=revision: self.db.rollback(); return False
+        self.db.execute("INSERT OR REPLACE INTO leases VALUES(?,?,?,?)",(sid,occurrence_id,revision,datetime.now(timezone.utc).timestamp()+ttl_seconds))
+        self.db.execute("INSERT OR IGNORE INTO notification_attempts VALUES(?,?,?,?,?,?,?)",(sid,occurrence_id,attempt,f"{sid}/{occurrence_id}","started",None,now()))
+        self.db.commit(); return True
     def accepted(self,sid,occurrence_id,delivery_id):
-        row=self.get(sid); self.db.execute("BEGIN")
+        self.db.execute("BEGIN IMMEDIATE")
+        row=self.db.execute("SELECT * FROM subscriptions WHERE id=?",(sid,)).fetchone()
+        occurrence=self.db.execute("SELECT 1 FROM occurrences WHERE id=?",(occurrence_id,)).fetchone()
+        attempt=self.db.execute("SELECT 1 FROM notification_attempts WHERE subscription_id=? AND occurrence_id=? AND outcome='started'",(sid,occurrence_id)).fetchone()
+        if not row or not occurrence or not attempt: self.db.rollback(); raise Conflict("accepted delivery lacks observed occurrence and started attempt")
+        if row["frequency"]=="one":
+            reservation=self.db.execute("SELECT * FROM one_reservations WHERE subscription_id=? AND occurrence_id=? AND state='reserved' AND revision=?",(sid,occurrence_id,row["revision"])).fetchone()
+            if not reservation: self.db.rollback(); raise Conflict("accepted delivery lacks current reservation")
         self.db.execute("INSERT OR IGNORE INTO accepted_deliveries VALUES(?,?,?,?)",(sid,occurrence_id,delivery_id,now()))
-        if row["frequency"]=="one": self.db.execute("UPDATE subscriptions SET state='finished',revision=revision+1,updated_at=? WHERE id=? AND state='active'",(now(),sid))
+        if row["frequency"]=="one":
+            cur=self.db.execute("UPDATE subscriptions SET state='finished',revision=revision+1,updated_at=? WHERE id=? AND state='active' AND revision=?",(now(),sid,row["revision"]))
+            if cur.rowcount!=1: self.db.rollback(); raise Conflict("subscription revision changed")
         self.db.execute("UPDATE one_reservations SET state='accepted' WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)); self.db.commit()
     def exhaust_one(self,sid,occurrence_id,reason="delivery_exhausted"):
         row=self.get(sid)
@@ -75,8 +98,10 @@ class Store:
         if cur.rowcount!=1: raise Conflict("subscription is not active")
         self.db.execute("INSERT OR IGNORE INTO dead_letters VALUES(?,?,?,?)",(sid,occurrence_id,reason,now())); self.db.commit(); return self.get(sid)
     def release_one(self,sid,occurrence_id):
-        self.get(sid); cur=self.db.execute("UPDATE one_reservations SET state='released' WHERE subscription_id=? AND occurrence_id=? AND state='reserved'",(sid,occurrence_id))
+        self.get(sid); cur=self.db.execute("UPDATE one_reservations SET state='released' WHERE subscription_id=? AND occurrence_id=? AND state IN ('reserved','dead')",(sid,occurrence_id))
         if cur.rowcount!=1: return False
+        self.db.execute("DELETE FROM dead_letters WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id))
+        self.db.execute("UPDATE subscriptions SET state='active',reason=NULL,revision=revision+1,updated_at=? WHERE id=? AND state='paused'",(now(),sid))
         self.db.commit(); return True
     def deliveries(self,sid,limit=100):
         self.get(sid)

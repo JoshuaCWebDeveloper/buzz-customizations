@@ -37,13 +37,14 @@ class FoundationTests(unittest.TestCase):
             s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); item=s.create("one",e,n)
             self.assertTrue(s.reserve_one(item["id"],"occ-1")); self.assertFalse(s.reserve_one(item["id"],"occ-2"))
             with self.assertRaises(Conflict): s.transition(item["id"],"pause",99)
+            s.record_occurrence(EventOccurrence("occ-1","fake","now")); self.assertTrue(s.claim(item["id"],"occ-1",item["revision"],1))
             s.accepted(item["id"],"occ-1","delivery-1"); self.assertEqual(s.get(item["id"])["state"],"finished"); s.close()
     def test_failed_attempt_does_not_consume_one_and_all_continues(self):
         with tempfile.TemporaryDirectory() as d:
             s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs()
             one=s.create("one",e,n); self.assertTrue(s.reserve_one(one["id"],"failed")); s.record_attempt(one["id"],"failed",1,"retryable","timeout")
             self.assertEqual(s.get(one["id"])["state"],"active"); self.assertFalse(s.reserve_one(one["id"],"later"))
-            all_sub=s.create("all",e,n); s.accepted(all_sub["id"],"a","d-a"); self.assertEqual(s.get(all_sub["id"])["state"],"active"); s.close()
+            all_sub=s.create("all",e,n); s.record_occurrence(EventOccurrence("a","fake","now")); self.assertTrue(s.claim(all_sub["id"],"a",all_sub["revision"],1)); s.accepted(all_sub["id"],"a","d-a"); self.assertEqual(s.get(all_sub["id"])["state"],"active"); s.close()
     def test_exhaustion_fails_closed_and_redacts_idempotent_result(self):
         with tempfile.TemporaryDirectory() as d:
             s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); item=s.create("one",e,n)
