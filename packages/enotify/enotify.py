@@ -1,57 +1,177 @@
 #!/usr/bin/env python3
-"""JSON-only subscription CLI."""
-import argparse, json, os
+"""JSON-only enotify provider and subscription control CLI."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
 from pathlib import Path
+import sys
+from typing import Any
+
 from enotify.models import EventTriggerSpec, NotificationAddressSpec
 from enotify.providers.events import default_registry as event_registry
 from enotify.providers.notifications import default_registry as notification_registry
-from enotify.storage import Store, Conflict
-from enotify.worker import Worker
+from enotify.storage import Conflict, Store
 
-def main(argv=None):
-    parser=argparse.ArgumentParser(prog="enotify"); parser.add_argument("--db",default=os.environ.get("ENOTIFY_DB",str(Path.home()/".local/state/enotify/enotify.db")))
-    sub=parser.add_subparsers(dest="command",required=True); p=sub.add_parser("provider"); p.add_argument("action",choices=("list",))
-    s=sub.add_parser("subscription"); ss=s.add_subparsers(dest="action",required=True)
-    c=ss.add_parser("create"); c.add_argument("--frequency",required=True); c.add_argument("--event",required=True); c.add_argument("--notification",required=True)
-    for action in ("list","get","pause","resume","delete","status","deliveries","retry","release"):
-        q=ss.add_parser(action); q.add_argument("id",nargs="?"); q.add_argument("--if-revision",type=int)
-        if action in ("retry","release"): q.add_argument("--occurrence",required=True)
-        if action=="retry": q.add_argument("--attempt",type=int,default=1)
-    u=ss.add_parser("update"); u.add_argument("id"); u.add_argument("--frequency"); u.add_argument("--event"); u.add_argument("--notification"); u.add_argument("--if-revision",type=int)
-    a=parser.parse_args(argv)
-    if a.command=="provider": print(json.dumps({"events":event_registry().describe(),"notifications":notification_registry().describe()},sort_keys=True)); return 0
-    store=Store(Path(a.db)); store.open()
+
+def read_json(source: str) -> dict[str, Any]:
+    text = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise ValueError("spec must be a JSON object")
+    return value
+
+
+def event_spec(source: str) -> EventTriggerSpec:
+    raw = EventTriggerSpec.from_mapping(read_json(source))
+    provider = event_registry().get(raw.provider, raw.event_type)
+    normalized = provider.validate_config(dict(raw.match), raw.schema_version)
+    return EventTriggerSpec(raw.provider, raw.event_type, raw.schema_version, normalized)
+
+
+def notification_spec(source: str) -> NotificationAddressSpec:
+    raw = NotificationAddressSpec.from_mapping(read_json(source))
+    provider = notification_registry().get(raw.provider, raw.notification_type)
+    normalized = provider.validate_config(dict(raw.address), raw.schema_version)
+    return NotificationAddressSpec(
+        raw.provider, raw.notification_type, raw.schema_version, normalized
+    )
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(prog="enotify")
+    root.add_argument(
+        "--db",
+        default=os.environ.get(
+            "ENOTIFY_DB", str(Path.home() / ".local/state/enotify/enotify.db")
+        ),
+    )
+    commands = root.add_subparsers(dest="command", required=True)
+
+    providers = commands.add_parser("provider")
+    provider_commands = providers.add_subparsers(dest="provider_action", required=True)
+    provider_commands.add_parser("list")
+    describe = provider_commands.add_parser("describe")
+    describe.add_argument("role", choices=("event", "notification"))
+    describe.add_argument("provider")
+    describe.add_argument("capability")
+
+    subscriptions = commands.add_parser("subscription")
+    subscription_commands = subscriptions.add_subparsers(dest="action", required=True)
+    create = subscription_commands.add_parser("create")
+    create.add_argument("--frequency", choices=("one", "all"), required=True)
+    create.add_argument("--event-spec", required=True, metavar="FILE|-")
+    create.add_argument("--notification-spec", required=True, metavar="FILE|-")
+
+    listing = subscription_commands.add_parser("list")
+    listing.add_argument("--state")
+    for action in ("get", "status"):
+        command = subscription_commands.add_parser(action)
+        command.add_argument("id")
+    for action in ("pause", "resume", "delete"):
+        command = subscription_commands.add_parser(action)
+        command.add_argument("id")
+        command.add_argument("--if-revision", type=int, required=True)
+
+    update = subscription_commands.add_parser("update")
+    update.add_argument("id")
+    update.add_argument("--if-revision", type=int, required=True)
+    update.add_argument("--frequency", choices=("one", "all"))
+    update.add_argument("--event-spec", metavar="FILE|-")
+    update.add_argument("--notification-spec", metavar="FILE|-")
+
+    deliveries = subscription_commands.add_parser("deliveries")
+    deliveries.add_argument("id")
+    deliveries.add_argument("--limit", type=int, default=100)
+    retry = subscription_commands.add_parser("retry")
+    retry.add_argument("id")
+    retry.add_argument("--reservation", required=True)
+    retry.add_argument("--if-revision", type=int, required=True)
+    release = subscription_commands.add_parser("release")
+    release.add_argument("id")
+    release.add_argument("--reservation", required=True)
+    release.add_argument("--if-revision", type=int, required=True)
+    release.add_argument("--resume", action="store_true")
+
+    commands.add_parser("status")
+    commands.add_parser("doctor")
+    return root
+
+
+def provider_command(args: argparse.Namespace) -> Any:
+    events = event_registry()
+    notifications = notification_registry()
+    if args.provider_action == "list":
+        return {"events": events.describe(), "notifications": notifications.describe()}
+    registry = events if args.role == "event" else notifications
+    return registry.get(args.provider, args.capability).describe()
+
+
+def main(argv: list[str] | None = None) -> int:
+    cli = parser()
+    args = cli.parse_args(argv)
     try:
-        if a.action=="create":
-            e=json.loads(a.event); n=json.loads(a.notification)
-            event_provider=event_registry().get(e["provider"],e["event_type"])
-            notification_provider=notification_registry().get(n["provider"],n["notification_type"])
-            match=event_provider.validate_config(e["match"],e["schema_version"])
-            address=notification_provider.validate_config(n["address"],n["schema_version"])
-            item=store.create(a.frequency,EventTriggerSpec(e["provider"],e["event_type"],e["schema_version"],match),NotificationAddressSpec(n["provider"],n["notification_type"],n["schema_version"],address))
-        elif a.action=="list": item=store.list()
-        elif a.action in ("get","status"): item=store.get(a.id)
-        elif a.action=="deliveries": item=store.deliveries(a.id)
-        elif a.action=="release": item=store.release_one(a.id, a.occurrence)
-        elif a.action=="retry":
-            subscription=store.get(a.id); address=subscription["notification_address"]
-            notification=notification_registry().get(address["provider"],address["notification_type"])
-            trigger=subscription["event_trigger"]; events=event_registry().get(trigger["provider"],trigger["event_type"])
-            item=Worker(store,events,notification).retry(subscription,a.occurrence,lambda occurrence: json.dumps(dict(occurrence),sort_keys=True),a.attempt)
-        elif a.action in ("pause","resume","delete"): item=store.transition(a.id,a.action,a.if_revision)
-        elif a.action=="update":
-            old=store.get(a.id)
-            event=EventTriggerSpec(**{**old["event_trigger"],"match":old["event_trigger"]["match"]}) if not a.event else None
-            notification=NotificationAddressSpec(**{**old["notification_address"],"address":old["notification_address"]["address"]}) if not a.notification else None
-            if a.event:
-                value=json.loads(a.event); provider=event_registry().get(value["provider"],value["event_type"])
-                event=EventTriggerSpec(value["provider"],value["event_type"],value["schema_version"],provider.validate_config(value["match"],value["schema_version"]))
-            if a.notification:
-                value=json.loads(a.notification); provider=notification_registry().get(value["provider"],value["notification_type"])
-                notification=NotificationAddressSpec(value["provider"],value["notification_type"],value["schema_version"],provider.validate_config(value["address"],value["schema_version"]))
-            item=store.update(a.id,a.frequency,event,notification,a.if_revision)
-        else: raise ValueError("unsupported action")
-        print(json.dumps(item,sort_keys=True)); return 0
-    except (ValueError,KeyError,Conflict) as exc: parser.error(str(exc)); return 2
-    finally: store.close()
-if __name__=="__main__": raise SystemExit(main())
+        if args.command == "provider":
+            result = provider_command(args)
+        else:
+            store = Store(Path(args.db))
+            store.open()
+            try:
+                if args.command in ("status", "doctor"):
+                    result = store.status()
+                elif args.action == "create":
+                    if args.event_spec == "-" and args.notification_spec == "-":
+                        raise ValueError("only one spec may read from stdin")
+                    result = store.create(
+                        args.frequency,
+                        event_spec(args.event_spec),
+                        notification_spec(args.notification_spec),
+                    )
+                elif args.action == "list":
+                    result = store.list(args.state)
+                elif args.action in ("get", "status"):
+                    result = store.get(args.id)
+                elif args.action in ("pause", "resume", "delete"):
+                    result = store.transition(args.id, args.action, args.if_revision)
+                elif args.action == "update":
+                    if args.event_spec == "-" and args.notification_spec == "-":
+                        raise ValueError("only one spec may read from stdin")
+                    result = store.update(
+                        args.id,
+                        args.if_revision,
+                        args.frequency,
+                        event_spec(args.event_spec) if args.event_spec else None,
+                        notification_spec(args.notification_spec)
+                        if args.notification_spec
+                        else None,
+                    )
+                elif args.action == "deliveries":
+                    result = store.deliveries(args.id, args.limit)
+                elif args.action == "retry":
+                    result = store.request_retry(
+                        args.id, args.reservation, args.if_revision
+                    )
+                elif args.action == "release":
+                    result = store.release(
+                        args.id,
+                        args.reservation,
+                        args.if_revision,
+                        args.resume,
+                    )
+                else:
+                    raise ValueError("unsupported action")
+            finally:
+                store.close()
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except Conflict as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+    except (ValueError, KeyError, OSError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

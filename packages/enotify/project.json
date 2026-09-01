@@ -3,8 +3,8 @@
   "name": "enotify",
   "root": "packages/enotify",
   "targets": {
-    "test": { "command": "python3 -m unittest discover -s packages/enotify -p 'test_*.py'" },
-    "lint": { "command": "python3 -m py_compile $(find packages/enotify -name '*.py')" },
+    "test": { "command": "PYTHONPATH=packages/enotify python3 -m unittest discover -s packages/enotify/tests -p 'test_*.py'" },
+    "lint": { "command": "python3 -m compileall -q packages/enotify" },
     "deploy": { "command": "python3 packages/enotify/deploy.py install" },
     "undeploy": { "command": "python3 packages/enotify/deploy.py uninstall" }
   }
