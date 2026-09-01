@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Callable
 import uuid
+import time
 
 from .providers.events import EventOccurrence, EventProvider
 from .providers.notifications import NotificationProvider, SendResult
@@ -17,6 +18,7 @@ class Worker:
         notification_provider: NotificationProvider,
         max_attempts: int = 3,
         owner: str | None = None,
+        clock: Callable[[], int] | None = None,
     ):
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
@@ -25,6 +27,7 @@ class Worker:
         self.notification_provider = notification_provider
         self.max_attempts = max_attempts
         self.owner = owner or f"worker-{uuid.uuid4()}"
+        self.clock = clock or (lambda: int(time.time()))
 
     def next_due(self) -> int | None:
         """Return the provider deadline for a shared non-blocking scheduler."""
@@ -40,6 +43,20 @@ class Worker:
         if restore is not None and snapshot is not None:
             restore(snapshot)
         cursor = self.store.checkpoint(self.event_provider.provider, source)
+        observe_ticks = getattr(self.event_provider, "observe_ticks", None)
+        process_tick = getattr(self.store, "process_typing_tick", None)
+        expire = getattr(self.store, "expire_typing", None)
+        if observe_ticks is not None and process_tick is not None and expire is not None:
+            observed_at = self.clock()
+            make = self.event_provider.transition_occurrence
+            matches = self.event_provider._matches
+            for occurrence in expire(self.event_provider.provider, source, observed_at, make, matches):
+                self._process_occurrence(subscription, occurrence, render, False)
+            ttl = self.event_provider.config["ttl"]
+            for tick in observe_ticks(cursor, observed_at):
+                for occurrence in process_tick(self.event_provider.provider, source, tick["id"], tick["created_at"], observed_at, ttl, make, matches):
+                    self._process_occurrence(subscription, occurrence, render, False)
+            return
         # Due transitions are advanced before relay input, and never by a
         # provider blocking in observe(). Providers without the optional
         # boundary retain the original behavior.
@@ -51,12 +68,12 @@ class Worker:
             self._process_occurrence(subscription, occurrence, render)
 
     def _process_occurrence(self, subscription: dict, occurrence: EventOccurrence,
-                            render: Callable[[EventOccurrence], str]) -> None:
+                            render: Callable[[EventOccurrence], str], persist_projection: bool = True) -> None:
         current = self.store.get(subscription["id"])
         if current["state"] != "active":
             return
         snapshot = getattr(self.event_provider, "snapshot", None)
-        occurrence_row = self.store.record_occurrence(occurrence, snapshot() if snapshot else None)
+        occurrence_row = self.store.record_occurrence(occurrence, snapshot() if snapshot and persist_projection else None)
         reservation = self.store.reserve(subscription["id"], occurrence_row["id"])
         if reservation is None:
             # A one-subscription already has a selected occurrence. Never

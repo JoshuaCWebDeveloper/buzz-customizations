@@ -312,10 +312,72 @@ class Store:
         ).fetchone()
         return dict(row) if row else None
 
-    def save_typing_projection(self, provider: str, source: str, state: dict[str, Any],
-                               cursor: str | None = None, last_transition_id: str | None = None) -> None:
-        """Persist the provider projection in one CAS-style replacement."""
+    def typing_due(self) -> int | None:
+        row = self._connection().execute(
+            "SELECT MIN(expires_at) FROM typing_projections WHERE active=1"
+        ).fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def process_typing_tick(self, provider: str, source: str, tick_id: str, tick_at: int,
+                            observed_at: int, ttl: int, make_occurrence: Callable[[str, int, int], EventOccurrence],
+                            matches: Callable[[EventOccurrence], bool]) -> list[EventOccurrence]:
+        """Serialize due-first typing evaluation, projection, cursor and log insert."""
+        emitted: list[EventOccurrence] = []
         with self._transaction() as db:
+            row = db.execute("SELECT * FROM typing_projections WHERE provider=? AND source=?", (provider, source)).fetchone()
+            if row is None:
+                db.execute("INSERT INTO typing_projections(provider,source,active,revision,updated_at) VALUES(?,?,?,?,?)", (provider, source, 0, 1, now()))
+                row = db.execute("SELECT * FROM typing_projections WHERE provider=? AND source=?", (provider, source)).fetchone()
+            revision = row["revision"]
+            active = bool(row["active"])
+            last_tick = row["last_tick_at"]
+            expires = row["expires_at"]
+            if active and expires is not None and expires <= observed_at:
+                occurrence = make_occurrence("stopped", expires, observed_at)
+                self._insert_typing_occurrence(db, occurrence)
+                if matches(occurrence): emitted.append(occurrence)
+                active, expires = False, None
+            if tick_at + ttl > observed_at and (last_tick is None or tick_at > last_tick):
+                was_active = active
+                active, last_tick, expires = True, tick_at, tick_at + ttl
+                if not was_active:
+                    occurrence = make_occurrence("started", tick_at, observed_at)
+                    self._insert_typing_occurrence(db, occurrence)
+                    if matches(occurrence): emitted.append(occurrence)
+            cursor = max(int(row["cursor"] or 0), tick_at)
+            db.execute("""UPDATE typing_projections SET active=?,last_tick_at=?,last_tick_id=?,expires_at=?,cursor=?,revision=revision+1,updated_at=?
+                         WHERE provider=? AND source=? AND revision=?""",
+                       (int(active), last_tick, tick_id if last_tick == tick_at else row["last_tick_id"], expires, cursor, now(), provider, source, revision))
+            db.execute("""INSERT INTO provider_checkpoints(provider,source,cursor,updated_at) VALUES(?,?,?,?)
+                         ON CONFLICT(provider,source) DO UPDATE SET cursor=MAX(CAST(provider_checkpoints.cursor AS INTEGER),CAST(excluded.cursor AS INTEGER)),updated_at=excluded.updated_at""",
+                       (provider, source, str(cursor), now()))
+        return emitted
+
+    def expire_typing(self, provider: str, source: str, observed_at: int,
+                      make_occurrence: Callable[[str, int, int], EventOccurrence],
+                      matches: Callable[[EventOccurrence], bool]) -> list[EventOccurrence]:
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM typing_projections WHERE provider=? AND source=? AND active=1 AND expires_at<=?", (provider, source, observed_at)).fetchone()
+            if not row: return []
+            occurrence = make_occurrence("stopped", row["expires_at"], observed_at)
+            self._insert_typing_occurrence(db, occurrence)
+            db.execute("UPDATE typing_projections SET active=0,expires_at=NULL,revision=revision+1,updated_at=? WHERE provider=? AND source=? AND revision=?", (now(), provider, source, row["revision"]))
+            return [occurrence] if matches(occurrence) else []
+
+    @staticmethod
+    def _insert_typing_occurrence(db: sqlite3.Connection, occurrence: EventOccurrence) -> None:
+        db.execute("INSERT OR IGNORE INTO event_occurrences VALUES(?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), occurrence.provider, occurrence.source, occurrence.occurrence_id, occurrence.observed_at, occurrence.cursor, canonical_json(occurrence.payload or {}), now()))
+
+    def save_typing_projection(self, provider: str, source: str, state: dict[str, Any],
+                               cursor: str | None = None, last_transition_id: str | None = None,
+                               expected_revision: int | None = None) -> None:
+        """Persist the provider projection with an optimistic revision check."""
+        with self._transaction() as db:
+            current = db.execute("SELECT revision FROM typing_projections WHERE provider=? AND source=?", (provider, source)).fetchone()
+            if current is not None and expected_revision is None:
+                raise Conflict("typing projection revision is required")
+            if current is not None and current[0] != expected_revision:
+                raise Conflict("typing projection revision conflict")
             db.execute(
                 """INSERT INTO typing_projections
                    (provider,source,active,last_tick_at,last_tick_id,expires_at,cursor,last_transition_id,updated_at)

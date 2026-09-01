@@ -82,6 +82,7 @@ transitions; refresh ticks extend the semantic deadline without emitting.
     "channel": "channel-id",
     "author": "author-pubkey",
     "ttl": 8,
+    "history_limit": 1000,
     "direction": "started"
   }
 }

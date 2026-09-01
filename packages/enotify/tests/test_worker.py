@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,7 @@ from enotify.providers.events import EventOccurrence
 from enotify.providers.notifications import SendResult
 from enotify.storage import Store
 from enotify.worker import Worker
+from enotify.providers.events.typing import BuzzTypingTransitionsProvider
 from tests.helpers import specs
 
 
@@ -104,4 +106,28 @@ class WorkerTests(unittest.TestCase):
                 store.db.execute("SELECT COUNT(*) FROM accepted_deliveries").fetchone()[0],
                 1,
             )
+            store.close()
+
+    def test_typing_refresh_is_durable_and_expiry_needs_no_relay_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            event = event.__class__("buzz", "typing-transitions", 1, {"community": "c", "channel": "ch", "author": "a", "ttl": 8})
+            subscription = store.create("all", event, notification)
+            rows = [{"id": "tick-1", "kind": 20002, "pubkey": "a", "created_at": 100, "tags": [["h", "ch"]]}]
+            class Result:
+                stdout = json.dumps({"community": "c"} if False else rows)
+            def run(command, **kwargs):
+                result = Result()
+                result.stdout = json.dumps({"community": "c"}) if "channels" in command else json.dumps(rows)
+                return result
+            provider = BuzzTypingTransitionsProvider(run, dict(event.match), lambda: 100)
+            sender = FakeNotifications([SendResult.accepted("start")])
+            Worker(store, provider, sender, clock=lambda: 100).process(subscription, lambda occurrence: occurrence.payload["direction"])
+            self.assertEqual(store.typing_projection("buzz", provider.source)["expires_at"], 108)
+            restarted = BuzzTypingTransitionsProvider(run, dict(event.match), lambda: 108)
+            sender2 = FakeNotifications([SendResult.accepted("stop")])
+            Worker(store, restarted, sender2, clock=lambda: 108).process(subscription, lambda occurrence: occurrence.payload["direction"])
+            self.assertEqual(sender2.keys, [sender2.keys[0]])
+            self.assertEqual(store.typing_projection("buzz", provider.source)["active"], 0)
             store.close()

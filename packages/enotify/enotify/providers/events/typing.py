@@ -51,13 +51,17 @@ class BuzzTypingTransitionsProvider:
         return {"role": self.role, "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1]}
 
     def validate_config(self, config: dict[str, Any], version: int) -> dict[str, Any]:
-        value = object_config(config, version, {"community", "channel", "author", "ttl", "direction", "state"}, {"community", "channel", "author"})
+        value = object_config(config, version, {"community", "channel", "author", "ttl", "direction", "state", "history_limit"}, {"community", "channel", "author"})
         for field in ("community", "channel", "author"):
             value[field] = nonempty_string(value[field], field)
         ttl = value.get("ttl", DEFAULT_TYPING_TTL)
         if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl <= 0:
             raise ValueError("ttl must be a positive integer")
         value["ttl"] = ttl
+        history_limit = value.get("history_limit", 1000)
+        if not isinstance(history_limit, int) or isinstance(history_limit, bool) or history_limit <= 0:
+            raise ValueError("history_limit must be a positive integer")
+        value["history_limit"] = history_limit
         if "direction" in value and value["direction"] not in ("started", "stopped"):
             raise ValueError("direction must be started or stopped")
         if "state" in value and value["state"] not in ("typing", "not-typing"):
@@ -66,10 +70,37 @@ class BuzzTypingTransitionsProvider:
 
     @property
     def source(self) -> str:
-        return json.dumps({k: self.config[k] for k in ("community", "channel", "author", "ttl")}, sort_keys=True, separators=(",", ":"))
+        return json.dumps({"provider": self.provider, "event_type": self.capability, **{k: self.config[k] for k in ("community", "channel", "author", "ttl", "history_limit")}}, sort_keys=True, separators=(",", ":"))
 
     def next_due(self) -> int | None:
         return self._expires_at if self._active else None
+
+    def observe_ticks(self, cursor: str | None = None, observed_at: int | None = None) -> list[dict[str, Any]]:
+        """Read bounded raw ticks; projection mutation belongs to Store."""
+        channel = self.config.get("channel")
+        if not channel:
+            return []
+        self._verify_community(channel)
+        since = max(0, int(cursor) - 1) if cursor is not None else 0
+        command = ["buzz", "messages", "get", "--channel", channel, "--limit", str(self.config["history_limit"]), "--kinds", "20002"]
+        if since:
+            command += ["--since", str(since)]
+        result = self._runner(command, check=True, capture_output=True, text=True)
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list):
+            raise ValueError("buzz messages get returned a non-array")
+        return [row for row in rows if _tick(row, channel, self.config["author"])]
+
+    def _verify_community(self, channel: str) -> None:
+        result = self._runner(["buzz", "channels", "get", "--channel", channel], check=True, capture_output=True, text=True)
+        value = json.loads(result.stdout)
+        actual = value.get("community") or value.get("community_id") if isinstance(value, dict) else None
+        if actual != self.config["community"]:
+            raise ValueError("Buzz channel community does not match configured community")
+
+    def transition_occurrence(self, direction: str, timestamp: int, observed_at: int) -> EventOccurrence:
+        prior, new = (("typing", "not-typing") if direction == "stopped" else ("not-typing", "typing"))
+        return self._occurrence(direction, prior, new, timestamp, observed_at)
 
     def snapshot(self) -> dict[str, Any]:
         return {"active": self._active, "last_tick_at": self._last_tick,
@@ -91,7 +122,7 @@ class BuzzTypingTransitionsProvider:
                     observed_at: int | None = None) -> EventOccurrence:
         identity = f"{self.source}:{direction}:{timestamp}"
         occurrence_id = hashlib.sha256(identity.encode()).hexdigest()
-        payload = {"community": self.config["community"], "channel": self.config["channel"], "author": self.config["author"], "direction": direction, "prior_state": prior, "new_state": new, "transition_at": timestamp, "semantic_transition_time": timestamp, "source": self.source}
+        payload = {"provider": self.provider, "event_type": self.capability, "community": self.config["community"], "channel": self.config["channel"], "author": self.config["author"], "direction": direction, "prior_state": prior, "new_state": new, "transition_at": timestamp, "semantic_transition_time": timestamp, "source": self.source, "occurrence_id": occurrence_id}
         return EventOccurrence(self.provider, self.source, occurrence_id, str(observed_at if observed_at is not None else timestamp), str(timestamp), payload)
 
     def _matches(self, occurrence: EventOccurrence) -> bool:
@@ -130,7 +161,7 @@ class BuzzTypingTransitionsProvider:
         if not channel:
             return ()
         since = max(0, int(cursor) - 1) if cursor is not None else 0
-        command = ["buzz", "messages", "get", "--channel", channel, "--kinds", "20002"]
+        command = ["buzz", "messages", "get", "--channel", channel, "--limit", str(self.config["history_limit"]), "--kinds", "20002"]
         if since:
             command += ["--since", str(since)]
         result = self._runner(command, check=True, capture_output=True, text=True)
