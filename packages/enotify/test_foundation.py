@@ -28,3 +28,13 @@ class FoundationTests(unittest.TestCase):
             one=s.create("one",e,n); self.assertTrue(s.reserve_one(one["id"],"failed")); s.record_attempt(one["id"],"failed",1,"retryable","timeout")
             self.assertEqual(s.get(one["id"])["state"],"active"); self.assertFalse(s.reserve_one(one["id"],"later"))
             all_sub=s.create("all",e,n); s.accepted(all_sub["id"],"a","d-a"); self.assertEqual(s.get(all_sub["id"])["state"],"active"); s.close()
+    def test_exhaustion_fails_closed_and_redacts_idempotent_result(self):
+        with tempfile.TemporaryDirectory() as d:
+            s=Store(Path(d)/"db.sqlite"); s.open(); e,n=self.specs(); item=s.create("one",e,n)
+            self.assertTrue(s.reserve_one(item["id"],"occ"))
+            result=s.exhaust_one(item["id"],"occ"); self.assertEqual(result["state"],"paused")
+            self.assertTrue(s.release_one(item["id"],"occ")); self.assertFalse(s.release_one(item["id"],"occ"))
+            value=s.mutate_idempotent("k","update",lambda: {"token":"secret","ok":True})
+            self.assertEqual(value["token"],"secret")
+            self.assertEqual(s.mutate_idempotent("k","update",lambda: {"token":"changed"})["token"],"[redacted]")
+            s.close()

@@ -25,7 +25,9 @@ class Store:
           attempt INTEGER NOT NULL, delivery_key TEXT NOT NULL, outcome TEXT, error TEXT, created_at TEXT NOT NULL,
           PRIMARY KEY(subscription_id,occurrence_id,attempt));
         CREATE TABLE IF NOT EXISTS accepted_deliveries(subscription_id TEXT NOT NULL, occurrence_id TEXT NOT NULL,
-          delivery_id TEXT NOT NULL, accepted_at TEXT NOT NULL, PRIMARY KEY(subscription_id,occurrence_id));""")
+          delivery_id TEXT NOT NULL, accepted_at TEXT NOT NULL, PRIMARY KEY(subscription_id,occurrence_id));
+        CREATE TABLE IF NOT EXISTS idempotency_keys(key TEXT PRIMARY KEY, operation TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS dead_letters(subscription_id TEXT NOT NULL, occurrence_id TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(subscription_id,occurrence_id));""")
         self.db.execute("INSERT OR IGNORE INTO migrations(version) VALUES(1)")
         self.db.commit()
     def close(self):
@@ -45,6 +47,15 @@ class Store:
         cur=self.db.execute("UPDATE subscriptions SET frequency=?,event_json=?,notification_json=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?",(frequency,event_json,notification_json,now(),sid,old["revision"]))
         if cur.rowcount!=1: raise Conflict("revision conflict")
         self.db.commit(); return self.get(sid)
+    def redact(self, value):
+        if isinstance(value, dict):
+            return {k: ("[redacted]" if any(x in k.lower() for x in ("secret","token","key","password")) else self.redact(v)) for k,v in value.items()}
+        if isinstance(value, list): return [self.redact(v) for v in value]
+        return value
+    def mutate_idempotent(self, key, operation, action):
+        row=self.db.execute("SELECT result_json FROM idempotency_keys WHERE key=?",(key,)).fetchone()
+        if row: return json.loads(row[0])
+        result=action(); self.db.execute("INSERT INTO idempotency_keys VALUES(?,?,?,?)",(key,operation,json.dumps(self.redact(result),sort_keys=True),now())); self.db.commit(); return result
     def _row(self,row):
         if not row: raise KeyError("subscription not found")
         return {"id":row["id"],"revision":row["revision"],"frequency":row["frequency"],"event_trigger":json.loads(row["event_json"]),"notification_address":json.loads(row["notification_json"]),"state":row["state"],"reason":row["reason"],"created_at":row["created_at"],"updated_at":row["updated_at"]}
@@ -70,3 +81,12 @@ class Store:
         self.db.execute("INSERT OR IGNORE INTO accepted_deliveries VALUES(?,?,?,?)",(sid,occurrence_id,delivery_id,now()))
         if row["frequency"]=="one": self.db.execute("UPDATE subscriptions SET state='finished',revision=revision+1,updated_at=? WHERE id=? AND state='active'",(now(),sid))
         self.db.execute("UPDATE one_reservations SET state='accepted' WHERE subscription_id=? AND occurrence_id=?",(sid,occurrence_id)); self.db.commit()
+    def exhaust_one(self,sid,occurrence_id,reason="delivery_exhausted"):
+        row=self.get(sid)
+        cur=self.db.execute("UPDATE subscriptions SET state='paused',revision=revision+1,reason=?,updated_at=? WHERE id=? AND state='active'",(reason,now(),sid))
+        if cur.rowcount!=1: raise Conflict("subscription is not active")
+        self.db.execute("INSERT OR IGNORE INTO dead_letters VALUES(?,?,?,?)",(sid,occurrence_id,reason,now())); self.db.commit(); return self.get(sid)
+    def release_one(self,sid,occurrence_id):
+        self.get(sid); cur=self.db.execute("UPDATE one_reservations SET state='released' WHERE subscription_id=? AND occurrence_id=? AND state='reserved'",(sid,occurrence_id))
+        if cur.rowcount!=1: return False
+        self.db.commit(); return True
