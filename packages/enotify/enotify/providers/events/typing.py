@@ -5,7 +5,6 @@ import hashlib
 import json
 import subprocess
 import time
-from collections import deque
 from typing import Any, Callable, Iterable
 
 from .interface import EventOccurrence
@@ -41,12 +40,6 @@ class BuzzTypingTransitionsProvider:
         self._runner = runner or subprocess.run
         self.config = self.validate_config(dict(config or {}), 1) if config is not None else {}
         self._clock = clock or (lambda: int(time.time()))
-        self._active = False
-        self._last_tick: int | None = None
-        self._last_tick_id: str | None = None
-        self._expires_at: int | None = None
-        self._seen: deque[str] = deque(maxlen=2048)
-        self._cursor: str | None = None
 
     def describe(self) -> dict[str, Any]:
         return {"role": self.role, "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1]}
@@ -74,7 +67,9 @@ class BuzzTypingTransitionsProvider:
         return json.dumps({"provider": self.provider, "event_type": self.capability, **{k: self.config[k] for k in ("community", "channel", "author", "ttl", "history_limit")}}, sort_keys=True, separators=(",", ":"))
 
     def next_due(self) -> int | None:
-        return self._expires_at if self._active else None
+        # Durable due state is owned by Store; providers never keep a second
+        # temporal projection in memory.
+        return None
 
     def observe_ticks(self, cursor: str | None = None, observed_at: int | None = None) -> list[dict[str, Any]]:
         """Read bounded raw ticks; projection mutation belongs to Store."""
@@ -104,22 +99,6 @@ class BuzzTypingTransitionsProvider:
         prior, new = (("typing", "not-typing") if direction == "stopped" else ("not-typing", "typing"))
         return self._occurrence(direction, prior, new, timestamp, observed_at)
 
-    def snapshot(self) -> dict[str, Any]:
-        return {"active": self._active, "last_tick_at": self._last_tick,
-                "last_tick_id": self._last_tick_id, "expires_at": self._expires_at,
-                "source": self.source, "cursor": self._cursor}
-
-    def restore(self, snapshot: dict[str, Any]) -> None:
-        if snapshot.get("source") != self.source:
-            raise ValueError("typing projection source mismatch")
-        self._active = bool(snapshot.get("active"))
-        self._last_tick = snapshot.get("last_tick_at")
-        self._last_tick_id = snapshot.get("last_tick_id")
-        self._expires_at = snapshot.get("expires_at")
-        self._cursor = snapshot.get("cursor")
-        if self._last_tick_id:
-            self._seen.append(self._last_tick_id)
-
     def _occurrence(self, direction: str, prior: str, new: str, timestamp: int,
                     observed_at: int | None = None) -> EventOccurrence:
         identity = f"{self.source}:{direction}:{timestamp}"
@@ -131,49 +110,8 @@ class BuzzTypingTransitionsProvider:
         return (("direction" not in self.config or self.config["direction"] == occurrence.payload["direction"]) and
                 ("state" not in self.config or self.config["state"] == occurrence.payload["new_state"]))
 
-    def advance(self, now: int) -> Iterable[EventOccurrence]:
-        if not self._active or self._expires_at is None or now < self._expires_at:
-            return ()
-        expiry = self._expires_at
-        self._active = False
-        self._expires_at = None
-        occurrence = self._occurrence("stopped", "typing", "not-typing", expiry, now)
-        return (occurrence,) if self._matches(occurrence) else ()
-
-    def _apply(self, event_id: str, timestamp: int, observed_at: int) -> list[EventOccurrence]:
-        self._cursor = str(timestamp)
-        result = list(self.advance(observed_at))
-        if event_id in self._seen or (self._last_tick is not None and timestamp <= self._last_tick):
-            return result
-        self._seen.append(event_id)
-        if timestamp + self.config["ttl"] <= observed_at:
-            return result
-        was_active = self._active
-        self._last_tick, self._last_tick_id = timestamp, event_id
-        self._expires_at = timestamp + self.config["ttl"]
-        self._active = True
-        if not was_active:
-            occurrence = self._occurrence("started", "not-typing", "typing", timestamp, observed_at)
-            if self._matches(occurrence):
-                result.append(occurrence)
-        return result
-
     def observe(self, cursor: str | None = None, observed_at: int | None = None) -> Iterable[EventOccurrence]:
-        channel = self.config.get("channel")
-        if not channel:
-            return ()
-        since = max(0, int(cursor) - 1) if cursor is not None else 0
-        command = ["buzz", "messages", "get", "--channel", channel, "--limit", str(self.config["history_limit"]), "--kinds", "20002"]
-        if since:
-            command += ["--since", str(since)]
-        result = self._runner(command, check=True, capture_output=True, text=True)
-        rows = json.loads(result.stdout)
-        if not isinstance(rows, list):
-            raise ValueError("buzz messages get returned a non-array")
-        now = self._clock() if observed_at is None else observed_at
-        occurrences: list[EventOccurrence] = []
-        for row in sorted((r for r in rows if isinstance(r, dict)), key=lambda r: (r.get("created_at", -1), r.get("id", ""))):
-            tick = _tick(row, channel, self.config["author"])
-            if tick:
-                occurrences.extend(self._apply(*tick, now))
-        return occurrences
+        # Protocol-compatible raw observation only. Temporal synthesis is
+        # intentionally implemented once, transactionally, by Store.
+        return tuple(EventOccurrence(self.provider, self.source, row["id"], str(row["created_at"]), str(row["created_at"]), row)
+                     for row in self.observe_ticks(cursor, observed_at))

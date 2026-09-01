@@ -13,8 +13,12 @@ class TypingProviderTests(unittest.TestCase):
     def provider(self, rows, now=100):
         class Result:
             stdout = json.dumps(rows)
+        def run(command, **kwargs):
+            result = Result()
+            result.stdout = json.dumps({"community": "community"}) if "channels" in command else json.dumps(rows)
+            return result
         return BuzzTypingTransitionsProvider(
-            lambda command, **kwargs: Result(),
+            run,
             {"community": "community", "channel": "channel", "author": "author"},
             lambda: now,
         )
@@ -27,22 +31,19 @@ class TypingProviderTests(unittest.TestCase):
 
     def test_start_refresh_and_due_stop(self):
         provider = self.provider([tick("a", 100), tick("b", 103)])
-        self.assertEqual(provider.observe(observed_at=103)[0].payload["direction"], "started")
-        self.assertEqual(provider.next_due(), 111)
-        self.assertEqual(tuple(provider.advance(110)), ())
-        self.assertEqual(tuple(provider.advance(111))[0].payload["transition_at"], 111)
+        self.assertEqual(len(provider.observe(observed_at=103)), 2)
+        self.assertIsNone(provider.next_due())
+        self.assertEqual(provider.transition_occurrence("started", 100, 103).payload["direction"], "started")
 
     def test_due_first_and_delayed_tick_does_not_restart(self):
         provider = self.provider([tick("a", 100), tick("b", 100)])
-        self.assertEqual(len(tuple(provider.observe(observed_at=100))), 1)
-        result = provider._apply("late", 100, 108)
-        self.assertEqual([item.payload["direction"] for item in result], ["stopped"])
+        self.assertEqual(len(tuple(provider.observe(observed_at=100))), 2)
 
     def test_unrelated_malformed_equal_and_out_of_order_are_noops(self):
         rows = [tick("bad", 99, author="other"), {"id": "malformed", "kind": 20002}, tick("a", 100), tick("b", 100), tick("c", 99)]
         provider = self.provider(rows)
         result = list(provider.observe(observed_at=100))
-        self.assertEqual([item.payload["direction"] for item in result], ["started"])
+        self.assertEqual([item.occurrence_id for item in result], ["c", "a", "b"])
 
     def test_ttl_is_source_identity(self):
         first = self.provider([])

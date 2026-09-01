@@ -37,13 +37,13 @@ class Worker:
     def process(self, subscription: dict, render: Callable[[EventOccurrence], str]) -> None:
         match = subscription["event_trigger"].get("match", {})
         source = getattr(self.event_provider, "source", None) or match.get("channel") or match.get("repository") or str(match.get("pid", "default"))
-        restore = getattr(self.event_provider, "restore", None)
+        observe_ticks = getattr(self.event_provider, "observe_ticks", None)
+        restore = getattr(self.event_provider, "restore", None) if observe_ticks is None else None
         projection = getattr(self.store, "typing_projection", None)
         snapshot = projection(self.event_provider.provider, source) if projection else None
         if restore is not None and snapshot is not None:
             restore(snapshot)
         cursor = self.store.checkpoint(self.event_provider.provider, source)
-        observe_ticks = getattr(self.event_provider, "observe_ticks", None)
         process_tick = getattr(self.store, "process_typing_tick", None)
         expire = getattr(self.store, "expire_typing", None)
         if observe_ticks is not None and process_tick is not None and expire is not None:
@@ -63,7 +63,7 @@ class Worker:
             for occurrence in self.store.typing_consumer_occurrences(subscription["id"], source):
                 if matches(occurrence):
                     self._process_occurrence(subscription, occurrence, render, False)
-                self.store.advance_typing_consumer(subscription["id"], source, occurrence.cursor)
+                self.store.advance_typing_consumer(subscription["id"], source, occurrence.cursor, occurrence.occurrence_id)
             return
         # Due transitions are advanced before relay input, and never by a
         # provider blocking in observe(). Providers without the optional

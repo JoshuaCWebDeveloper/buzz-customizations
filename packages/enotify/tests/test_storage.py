@@ -20,12 +20,12 @@ class StorageTests(unittest.TestCase):
     def test_migrations_are_repeatable_and_wal_enabled(self):
         with tempfile.TemporaryDirectory() as directory:
             first = self.open_store(directory)
-            self.assertEqual(first.status()["migration_version"], 4)
+            self.assertEqual(first.status()["migration_version"], 5)
             self.assertEqual(first.status()["journal_mode"], "wal")
             first.close()
             second = self.open_store(directory)
             self.assertEqual(
-                second.db.execute("SELECT COUNT(*) FROM migrations").fetchone()[0], 4
+                second.db.execute("SELECT COUNT(*) FROM migrations").fetchone()[0], 5
             )
             second.close()
 
