@@ -178,3 +178,23 @@ class WorkerTests(unittest.TestCase):
             Worker(store, BuzzTypingTransitionsProvider(run, base), stop_sender, clock=lambda: 108).process(late, lambda occurrence: occurrence.payload["direction"])
             self.assertEqual(len(stop_sender.keys), 1)
             store.close()
+
+    def test_restart_recovers_occurrence_committed_before_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            match = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
+            event = event.__class__("buzz", "typing-transitions", 1, match)
+            subscription = store.create("all", event, notification)
+            def run(command, **kwargs):
+                class Result: pass
+                result = Result(); result.stdout = json.dumps({"community": "c"} if "channels" in command else []); return result
+            provider = BuzzTypingTransitionsProvider(run, match)
+            occurrence = store.process_typing_tick("buzz", provider.source, "tick-1", 100, 100, 8, provider.transition_occurrence, lambda _: True)[0]
+            # Simulate process death here: the durable occurrence exists, but
+            # no reservation has been created yet.
+            sender = FakeNotifications([SendResult.accepted("recovered")])
+            Worker(store, BuzzTypingTransitionsProvider(run, match), sender, clock=lambda: 100).process(subscription, lambda item: item.payload["direction"])
+            self.assertEqual(len(sender.keys), 1)
+            self.assertEqual(store.db.execute("SELECT COUNT(*) FROM delivery_reservations").fetchone()[0], 1)
+            store.close()
