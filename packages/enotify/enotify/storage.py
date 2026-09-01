@@ -213,7 +213,8 @@ class Store:
             if cursor.rowcount != 1:
                 raise Conflict("revision conflict or terminal subscription")
             old_typing = old["event_trigger"].get("provider") == "buzz" and old["event_trigger"].get("event_type") == "typing-transitions"
-            if event and event.provider == "buzz" and event.event_type == "typing-transitions":
+            new_typing = (event.provider == "buzz" and event.event_type == "typing-transitions") if event else old_typing
+            if event and new_typing:
                 source = typing_source(dict(event.match))
                 new_revision = expected + 1
                 db.execute("DELETE FROM typing_consumers WHERE subscription_id=?", (subscription_id,))
@@ -221,6 +222,11 @@ class Store:
                 db.execute("INSERT INTO typing_consumers(subscription_id,source,eligible_after,cursor,updated_at,revision,cursor_occurrence_id) VALUES(?,?,?,?,?,?,?)", (subscription_id, source, now(), int(checkpoint[0]) if checkpoint else 0, now(), new_revision, ""))
             elif event and old_typing:
                 db.execute("DELETE FROM typing_consumers WHERE subscription_id=?", (subscription_id,))
+            elif old_typing:
+                # Non-event updates advance the subscription revision but do
+                # not change eligibility or watermark.
+                source = typing_source(dict(old["event_trigger"]["match"]))
+                db.execute("UPDATE typing_consumers SET revision=? WHERE subscription_id=? AND source=?", (expected + 1, subscription_id, source))
             self.audit("subscription.update", subscription_id, {"from_revision": expected})
         return self.get(subscription_id)
 
@@ -367,7 +373,8 @@ class Store:
             existing = db.execute("SELECT 1 FROM typing_consumers WHERE subscription_id=? AND source=?", (subscription_id, source)).fetchone()
             if existing: return
             checkpoint = db.execute("SELECT cursor FROM provider_checkpoints WHERE provider=? AND source=?", ("buzz", source)).fetchone()
-            db.execute("INSERT INTO typing_consumers VALUES(?,?,?,?,?)", (subscription_id, source, stamp, int(checkpoint[0]) if checkpoint else 0, stamp))
+            subscription = db.execute("SELECT revision FROM subscriptions WHERE id=?", (subscription_id,)).fetchone()
+            db.execute("INSERT INTO typing_consumers(subscription_id,source,eligible_after,cursor,updated_at,revision,cursor_occurrence_id) VALUES(?,?,?,?,?,?,?)", (subscription_id, source, stamp, int(checkpoint[0]) if checkpoint else 0, stamp, subscription[0], ""))
 
     def typing_consumer_occurrences(self, subscription_id: str, source: str, limit: int = 1000) -> list[EventOccurrence]:
         rows = self._connection().execute(

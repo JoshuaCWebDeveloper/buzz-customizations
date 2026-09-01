@@ -198,3 +198,37 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(len(sender.keys), 1)
             self.assertEqual(store.db.execute("SELECT COUNT(*) FROM delivery_reservations").fetchone()[0], 1)
             store.close()
+
+    def test_same_cursor_stop_start_survives_consumer_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            match = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
+            event = event.__class__("buzz", "typing-transitions", 1, match)
+            subscription = store.create("all", event, notification)
+            provider = BuzzTypingTransitionsProvider(config=match)
+            store.process_typing_tick("buzz", provider.source, "tick-1", 100, 100, 8, provider.transition_occurrence, lambda _: True)
+            initial = store.typing_consumer_occurrences(subscription["id"], provider.source)[0]
+            store.advance_typing_consumer(subscription["id"], provider.source, initial.cursor, initial.occurrence_id)
+            store.process_typing_tick("buzz", provider.source, "tick-2", 108, 108, 8, provider.transition_occurrence, lambda _: True)
+            pending = store.typing_consumer_occurrences(subscription["id"], provider.source)
+            self.assertEqual([item.payload["direction"] for item in pending], ["stopped", "started"])
+            store.advance_typing_consumer(subscription["id"], provider.source, pending[0].cursor, pending[0].occurrence_id)
+            after_restart = store.typing_consumer_occurrences(subscription["id"], provider.source)
+            self.assertEqual([item.payload["direction"] for item in after_restart], ["started"])
+            store.close()
+
+    def test_notification_only_update_keeps_typing_consumer_eligible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open(directory)
+            event, notification = specs()
+            match = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
+            event = event.__class__("buzz", "typing-transitions", 1, match)
+            subscription = store.create("all", event, notification)
+            source = BuzzTypingTransitionsProvider(config=match).source
+            before = dict(store.db.execute("SELECT revision,cursor FROM typing_consumers WHERE subscription_id=?", (subscription["id"],)).fetchone())
+            updated = store.update(subscription["id"], subscription["revision"], frequency="one")
+            after = dict(store.db.execute("SELECT revision,cursor FROM typing_consumers WHERE subscription_id=?", (subscription["id"],)).fetchone())
+            self.assertEqual(after["revision"], updated["revision"])
+            self.assertEqual(after["cursor"], before["cursor"])
+            store.close()
