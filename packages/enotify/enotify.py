@@ -16,7 +16,10 @@ from enotify.storage import Conflict, Store
 
 
 def read_json(source: str) -> dict[str, Any]:
-    text = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+    stripped = source.lstrip()
+    text = source if stripped.startswith("{") else (
+        sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+    )
     value = json.loads(text)
     if not isinstance(value, dict):
         raise ValueError("spec must be a JSON object")
@@ -61,8 +64,8 @@ def parser() -> argparse.ArgumentParser:
     subscription_commands = subscriptions.add_subparsers(dest="action", required=True)
     create = subscription_commands.add_parser("create")
     create.add_argument("--frequency", choices=("one", "all"), required=True)
-    create.add_argument("--event-spec", required=True, metavar="FILE|-")
-    create.add_argument("--notification-spec", required=True, metavar="FILE|-")
+    create.add_argument("--event-spec", required=True, metavar="JSON|FILE|-")
+    create.add_argument("--notification-spec", required=True, metavar="JSON|FILE|-")
 
     listing = subscription_commands.add_parser("list")
     listing.add_argument("--state")
@@ -78,8 +81,8 @@ def parser() -> argparse.ArgumentParser:
     update.add_argument("id")
     update.add_argument("--if-revision", type=int, required=True)
     update.add_argument("--frequency", choices=("one", "all"))
-    update.add_argument("--event-spec", metavar="FILE|-")
-    update.add_argument("--notification-spec", metavar="FILE|-")
+    update.add_argument("--event-spec", metavar="JSON|FILE|-")
+    update.add_argument("--notification-spec", metavar="JSON|FILE|-")
 
     deliveries = subscription_commands.add_parser("deliveries")
     deliveries.add_argument("id")

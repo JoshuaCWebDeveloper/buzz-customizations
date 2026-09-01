@@ -17,6 +17,31 @@ def load_cli():
 
 
 class CliTests(unittest.TestCase):
+    def test_inline_json_specs_apply_version_and_provider_defaults(self):
+        cli = load_cli()
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite"
+            event = json.dumps({
+                "provider": "buzz", "event_type": "typing-transitions",
+                "match": {"community": "community", "channel": "channel", "author": "author"},
+            })
+            notification = json.dumps({
+                "provider": "buzz", "notification_type": "message",
+                "address": {"community": "community", "channel": "channel"},
+            })
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(cli.main([
+                    "--db", str(database), "subscription", "create", "--frequency", "one",
+                    "--event-spec", event, "--notification-spec", notification,
+                ]), 0)
+            created = json.loads(output.getvalue())
+            self.assertEqual(created["event_trigger"]["schema_version"], 1)
+            self.assertEqual(created["event_trigger"]["match"]["ttl"], 8)
+            self.assertEqual(created["event_trigger"]["match"]["history_limit"], 1000)
+            self.assertEqual(created["notification_address"]["schema_version"], 1)
+            self.assertNotIn("mention", created["notification_address"]["address"])
+
     def test_provider_inspection_and_json_file_crud(self):
         cli = load_cli()
         with tempfile.TemporaryDirectory() as directory:

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deploy import MARKER, UNIT_NAME, deploy, install, rollback_release, stage_release, unit, uninstall
+from deploy import MARKER, UNIT_NAME, deploy, install, install_cli, rollback_release, stage_release, unit, uninstall
 
 
 class DeployTests(unittest.TestCase):
@@ -33,6 +33,16 @@ class DeployTests(unittest.TestCase):
             self.assertIn(str(release / "enotify-worker.py"), unit(state, release))
             self.assertIn(f"ENOTIFY_DB={state / 'enotify.db'}", unit(state, release))
             self.assertNotIn("BUZZ_PRIVATE_KEY", unit(state, release))
+            self.assertIn("UMask=0007", unit(state, release))
+
+    def test_installed_cli_uses_production_state_without_caller_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install_cli(root / "bin", root / "state", root / "release")
+            launcher = (root / "bin" / "enotify").read_text(encoding="utf-8")
+            self.assertIn(f'ENOTIFY_DB="${{ENOTIFY_DB:-{root / "state" / "enotify.db"}}}"', launcher)
+            self.assertIn(str(root / "release" / "enotify.py"), launcher)
+            self.assertEqual((root / "bin" / "enotify").stat().st_mode & 0o777, 0o755)
 
     def test_release_rollback_restores_previous_tree(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -59,7 +69,7 @@ class DeployTests(unittest.TestCase):
                     if command[:2] == ["systemctl", "is-active"]:
                         return Result(0 if active else 3)
                     return Result(0)
-                deploy("install", root / "state", root / "units", runner=runner, release_dir=root / "release")
+                deploy("install", root / "state", root / "units", runner=runner, release_dir=root / "release", bin_dir=root / "bin")
                 self.assertIn(["systemctl", "is-active", UNIT_NAME], calls)
                 self.assertIn(["systemctl", expected, UNIT_NAME], calls)
                 if active:

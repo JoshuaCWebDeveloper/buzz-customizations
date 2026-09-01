@@ -58,7 +58,9 @@ class EventTriggerSpec:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "EventTriggerSpec":
-        data = _envelope(value, {"provider", "event_type", "schema_version", "match"}, "event spec")
+        supplied = dict(value)
+        supplied.setdefault("schema_version", 1)
+        data = _envelope(supplied, {"provider", "event_type", "schema_version", "match"}, "event spec")
         return cls(**data)
 
     def envelope(self) -> dict[str, Any]:
@@ -88,8 +90,10 @@ class NotificationAddressSpec:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "NotificationAddressSpec":
+        supplied = dict(value)
+        supplied.setdefault("schema_version", 1)
         data = _envelope(
-            value,
+            supplied,
             {"provider", "notification_type", "schema_version", "address"},
             "notification spec",
         )
