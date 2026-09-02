@@ -18,6 +18,31 @@ def load_cli():
 
 
 class CliTests(unittest.TestCase):
+    def test_create_defaults_to_all_and_accepts_explicit_frequencies(self):
+        cli = load_cli()
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite"
+            event = json.dumps({
+                "provider": "buzz", "event_type": "typing-transitions",
+                "match": {"community": "community", "channel": "channel", "author": "author"},
+            })
+            notification = json.dumps({
+                "provider": "buzz", "notification_type": "message",
+                "address": {"community": "community", "channel": "channel"},
+            })
+            def create(*extra):
+                output = StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(cli.main([
+                        "--db", str(database), "subscription", "create", *extra,
+                        "--event-spec", event, "--notification-spec", notification,
+                    ]), 0)
+                return json.loads(output.getvalue())
+
+            self.assertEqual(create()["frequency"], "all")
+            self.assertEqual(create("--frequency", "one")["frequency"], "one")
+            self.assertEqual(create("--frequency", "all")["frequency"], "all")
+
     def test_invalid_content_is_rejected_during_create_and_update(self):
         cli = load_cli()
         with tempfile.TemporaryDirectory() as directory:
