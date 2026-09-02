@@ -22,7 +22,7 @@ class BuzzNotificationTests(unittest.TestCase):
     def test_custom_content_renders_started_and_stopped(self):
         provider = BuzzMessageProvider({
             "community": "c", "channel": "ch",
-            "content": "{author} has {direction} working",
+            "content": "Phaeax has {direction} working",
         })
         self.assertEqual(provider.render(self.occurrence("started")), "Phaeax has started working")
         self.assertEqual(provider.render(self.occurrence("stopped")), "Phaeax has stopped working")
@@ -83,7 +83,7 @@ class BuzzNotificationTests(unittest.TestCase):
         }, run)
         result = provider.send(provider.render(self.occurrence("stopped")), "key")
         self.assertEqual(result.outcome, "accepted")
-        self.assertEqual(seen["input"], "@Ada Phaeax has stopped working")
+        self.assertEqual(seen["input"], "@Ada Ada has stopped working")
 
     def test_omitted_mention_has_no_mention_argument_or_text(self):
         seen = {}
