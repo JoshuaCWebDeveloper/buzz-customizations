@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Mapping, Protocol
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,15 @@ class SendResult:
     @classmethod
     def permanent(cls, error: str) -> "SendResult":
         return cls("permanent", error=error)
+
+
+class MessageContext(Protocol):
+    """Role-neutral occurrence shape accepted by message renderers."""
+
+    provider: str
+    source: str
+    occurrence_id: str
+    payload: Mapping[str, Any] | None
 
 
 class NotificationProvider(Protocol):

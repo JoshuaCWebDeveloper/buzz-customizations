@@ -62,7 +62,10 @@ def main() -> int:
                     event_provider = type(event_provider)(config=dict(event.match))
                     notification_provider = type(notification_provider)(config=dict(notification.address))
                     Worker(store, event_provider, notification_provider).process(
-                        subscription, lambda occurrence: json.dumps(occurrence.payload or {}, sort_keys=True)
+                        subscription,
+                        notification_provider.render
+                        if hasattr(notification_provider, "render")
+                        else lambda occurrence: json.dumps(occurrence.payload or {}, sort_keys=True),
                     )
                 except Exception as exc:
                     print(f"enotify provider unavailable: {type(exc).__name__}", file=sys.stderr)

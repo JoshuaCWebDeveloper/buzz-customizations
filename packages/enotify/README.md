@@ -14,6 +14,19 @@ Event and notification specs are JSON-only and deliberately distinct:
 {"provider":"buzz","notification_type":"message","schema_version":1,"address":{"community":"community-id","channel":"channel-id","mention":{"pubkey":"hex-or-npub","handle":"Alice"}}}
 ```
 
+Buzz message addresses may also contain optional `content` text with only the
+`{author}` and `{direction}` fields. `{author}` is the validated mention handle
+when `mention` is configured; the typing event's Nostr author pubkey is never
+used as display text. For a no-mention address, use literal text such as
+`"content":"Phaeax has {direction} working"`, which renders exactly
+`Phaeax has started working` or `Phaeax has stopped working`.
+Templates are literal text plus those two fields; attribute access, indexing,
+conversions, format specifications, and expressions are rejected during
+subscription create/update validation. Without `content`, typing transitions
+use the compact `Typing {direction}` default; existing addresses remain valid
+without migration. Mentions are still prepended and passed as structured Buzz
+CLI mentions.
+
 Providers reject unknown fields and normalize accepted values before persistence. Event and notification interfaces, registries, implementations, and tests are physically separate; `buzz/channel-events` and `buzz/message` resolve only through their role-specific registries.
 
 The initial provider implementations are validation and extension seams. They do not yet observe Buzz, GitHub, or process events and do not publish Buzz messages. `system-process/exited` describes an already-running PID and never launches or supervises a process.
@@ -47,7 +60,7 @@ typing TTL/history limit and omitted notification mention use provider defaults:
 ```bash
 enotify subscription create --frequency one \
   --event-spec '{"provider":"buzz","event_type":"typing-transitions","match":{"community":"COMMUNITY_ID","channel":"CHANNEL_ID","author":"AUTHOR_PUBKEY"}}' \
-  --notification-spec '{"provider":"buzz","notification_type":"message","address":{"community":"COMMUNITY_ID","channel":"CHANNEL_ID"}}'
+  --notification-spec '{"provider":"buzz","notification_type":"message","address":{"community":"COMMUNITY_ID","channel":"CHANNEL_ID","content":"Phaeax has {direction} working"}}'
 ```
 
 Create and update read each JSON spec from a file or from `-` (stdin). Only one spec may use stdin in a command. Mutating existing subscriptions requires an optimistic revision. Retry and release operate on explicit reservation IDs; exhausted `one` reservations remain selected and paused until an operator retries or releases them.
