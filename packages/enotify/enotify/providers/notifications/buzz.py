@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import string
 import subprocess
 from typing import Any, Callable
-from .interface import SendResult
+from .interface import MessageContext, SendResult
 
 
 def _text(value: Any, field: str) -> str:
@@ -20,18 +21,18 @@ class BuzzMessageProvider:
     capability = "message"
 
     def __init__(self, config: dict[str, Any] | None = None, runner: Callable[..., Any] | None = None):
-        self.config = dict(config or {})
+        self.config = self.validate_config(dict(config or {}), 1) if config is not None else {}
         self._runner = runner or subprocess.run
 
     def describe(self) -> dict[str, Any]:
-        return {"role": self.role, "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1]}
+        return {"role": self.role, "provider": self.provider, "capabilities": [self.capability], "schema_versions": [1], "content_variables": ["author", "direction"]}
 
     def validate_config(self, config: dict[str, Any], version: int) -> dict[str, Any]:
         if version != 1:
             raise ValueError("unsupported notification schema version")
         if not isinstance(config, dict):
             raise ValueError("notification address must be an object")
-        unknown = set(config) - {"community", "channel", "mention"}
+        unknown = set(config) - {"community", "channel", "mention", "content"}
         missing = {"community", "channel"} - set(config)
         if unknown:
             raise ValueError("unknown notification address fields: " + ",".join(sorted(unknown)))
@@ -49,7 +50,35 @@ class BuzzMessageProvider:
                 "pubkey": _text(mention["pubkey"], "mention.pubkey"),
                 "handle": _text(mention["handle"], "mention.handle"),
             }
+        if "content" in config:
+            normalized["content"] = self._validate_template(config["content"])
         return normalized
+
+    @staticmethod
+    def _validate_template(value: Any) -> str:
+        template = _text(value, "content")
+        try:
+            parsed = list(string.Formatter().parse(template))
+        except ValueError as exc:
+            raise ValueError(f"invalid content template: {exc}") from None
+        for _literal, field, format_spec, conversion in parsed:
+            if field is None:
+                continue
+            if field not in {"author", "direction"} or format_spec or conversion:
+                raise ValueError("content template allows only {author} and {direction}")
+        return template
+
+    def render(self, occurrence: MessageContext) -> str:
+        payload = occurrence.payload or {}
+        direction = payload.get("direction")
+        template = self.config.get("content")
+        if template is None:
+            if isinstance(direction, str):
+                return f"Typing {direction}"
+            return f"{occurrence.provider}/{occurrence.source} event {occurrence.occurrence_id}"
+        mention = self.config.get("mention")
+        author = mention.get("handle", "") if isinstance(mention, dict) else ""
+        return template.format_map({"author": author, "direction": direction or ""})
 
     def send(self, message: str, delivery_key: str) -> SendResult:
         channel = self.config.get("channel")

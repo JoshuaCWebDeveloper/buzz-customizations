@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from enotify.providers.events import EventOccurrence
+from enotify.models import NotificationAddressSpec
 from enotify.storage import Conflict, Store
 from tests.helpers import specs
 
@@ -51,6 +52,24 @@ class StorageTests(unittest.TestCase):
             with self.assertRaises(Conflict):
                 store.mutate_idempotent("key", "test", {"value": 2}, lambda: {})
             store.close()
+
+    def test_custom_content_survives_store_reload_without_migration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open_store(directory)
+            event, _ = specs()
+            notification = NotificationAddressSpec(
+                "buzz", "message", 1,
+                {"community": "community", "channel": "channel", "content": "{author} has {direction} working"},
+            )
+            subscription = store.create("all", event, notification)
+            store.close()
+            reloaded = self.open_store(directory)
+            self.assertEqual(
+                reloaded.get(subscription["id"])["notification_address"]["address"]["content"],
+                "{author} has {direction} working",
+            )
+            self.assertEqual(reloaded.status()["migration_version"], 5)
+            reloaded.close()
 
     def test_single_winner_one_reservation_under_concurrency(self):
         with tempfile.TemporaryDirectory() as directory:
