@@ -45,6 +45,10 @@ enotify subscription create \
   --notification-spec notification.json
 # Omit --frequency for the default `all`; pass `--frequency one` explicitly
 # when the subscription should stop after its first accepted delivery.
+# Only one active or paused `all` subscription may have the same canonical event
+# and notification specs. A conflicting create fails and names the existing ID;
+# `one` subscriptions may be repeated. Finished, dead, and deleted subscriptions
+# do not block recreation.
 enotify subscription update SUBSCRIPTION_ID \
   --if-revision 1 \
   --event-spec event.json
@@ -68,7 +72,7 @@ Create and update read each JSON spec from a file or from `-` (stdin). Only one 
 
 ## Persistence and delivery semantics
 
-`Store.open()` enables WAL and applies every unapplied `migrations/NNN_name.sql` file in order. Occurrences are deduplicated by provider/source/occurrence identity. Each delivery has a reservation, deterministic delivery key, lease, attempts, accepted receipt or dead letter. No database transaction spans provider I/O.
+`Store.open()` enables WAL and applies every unapplied `migrations/NNN_name.sql` file in order. Occurrences are deduplicated by provider/source/occurrence identity. Active and paused `all` subscriptions are unique by canonical event and notification JSON, with SQLite enforcing the invariant for concurrent creates. Migration retires later pre-existing duplicates as deleted rows, preserving their IDs and delivery history. Each delivery has a reservation, deterministic delivery key, lease, attempts, accepted receipt or dead letter. No database transaction spans provider I/O.
 
 For `one`, a partial unique index admits only one open reservation. Retryable failure keeps that occurrence selected; exhaustion pauses the subscription and fails closed. Accepted delivery finishes it. For `all`, every occurrence gets its own reservation; an exhausted occurrence is dead-lettered while the subscription continues. A provider result arriving after pause, update, or delete is retained as `accepted_late` and cannot resurrect or finish the subscription.
 
@@ -90,7 +94,7 @@ npx nx test enotify
 npx nx lint enotify
 ```
 
-The tests cover strict provider schemas, role separation, repeatable migrations, optimistic revisions, redaction/idempotent replay, concurrent single-winner reservation, lease recovery, late results, `one` retry/exhaustion/release, and `all` continuation.
+The tests cover strict provider schemas, role separation, repeatable migrations, deterministic duplicate migration, canonical all-subscription conflicts, concurrent all creates, repeated `one` creates, optimistic revisions, redaction/idempotent replay, concurrent single-winner reservation, lease recovery, late results, `one` retry/exhaustion/release, and `all` continuation.
 # Buzz typing transition events
 
 The event provider `buzz/typing-transitions` is a version-1, role-safe event
