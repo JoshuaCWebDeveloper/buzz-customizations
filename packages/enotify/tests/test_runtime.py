@@ -426,6 +426,11 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn("while", entry_source)
         self.assertIn("runtimes.close()", service_source)
         self.assertIn("store.close()", service_source)
+        typing_root = root / "typing"
+        self.assertTrue((typing_root / "provider.py").is_file())
+        self.assertTrue((typing_root / "runtime.py").is_file())
+        self.assertTrue((typing_root / "storage.py").is_file())
+        self.assertFalse(any(typing_root.parent.joinpath("providers/events").glob("typing*.py")))
         tree = ast.parse((root / "storage.py").read_text(encoding="utf-8"))
         store = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Store")
         names = {node.name for node in store.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}

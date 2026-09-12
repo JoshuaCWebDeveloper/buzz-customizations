@@ -8,8 +8,8 @@ from pathlib import Path
 from enotify.providers.events import EventOccurrence
 from enotify.models import NotificationAddressSpec
 from enotify.storage import Conflict, Store
-from enotify.providers.events.typing import BuzzTypingTransitionsProvider
-from enotify.providers.events.typing_storage import BuzzTypingRepository
+from enotify.typing.provider import BuzzTypingTransitionsProvider
+from enotify.typing.storage import BuzzTypingRepository
 from tests.helpers import specs
 
 

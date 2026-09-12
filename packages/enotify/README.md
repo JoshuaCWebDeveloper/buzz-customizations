@@ -2,6 +2,11 @@
 
 `enotify` is an independent, package-owned notification control-plane foundation. It owns its SQLite WAL database, numbered forward migrations, provider registries, lifecycle CLI, delivery ledger, tests, and explicit deploy/undeploy scaffolding. It does not import Buzz Server internals or change Buzz Server state.
 
+The production Buzz typing implementation has one source boundary in
+`enotify/typing/`, containing its provider, runtime, and durable-state code.
+The generic event, runtime, and storage registries retain the existing public
+`buzz/typing-transitions` identifier through narrow registration/export shims.
+
 ## Persisted contract
 
 Event and notification specs are JSON-only and deliberately distinct:

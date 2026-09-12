@@ -8,8 +8,8 @@ from enotify.providers.events import EventOccurrence
 from enotify.providers.notifications import SendResult
 from enotify.storage import Store
 from enotify.worker import Worker
-from enotify.providers.events.typing import BuzzTypingTransitionsProvider
-from enotify.providers.events.typing_storage import BuzzTypingRepository
+from enotify.typing.provider import BuzzTypingTransitionsProvider
+from enotify.typing.storage import BuzzTypingRepository
 from tests.helpers import specs
 
 

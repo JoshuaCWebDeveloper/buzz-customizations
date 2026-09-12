@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from .interface import EventOccurrence
+from ..providers.events.interface import EventOccurrence
 
 
 def typing_source(match: dict[str, Any]) -> str:

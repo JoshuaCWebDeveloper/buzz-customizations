@@ -11,8 +11,8 @@ import time
 from collections import deque
 from typing import Any, Callable, Iterable
 
-from .interface import EventOccurrence
-from .schema import nonempty_string, object_config
+from ..providers.events.interface import EventOccurrence
+from ..providers.events.schema import nonempty_string, object_config
 
 DEFAULT_TYPING_TTL = 8
 STREAM_BACKLOG_LIMIT = 2048
