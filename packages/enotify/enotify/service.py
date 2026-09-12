@@ -110,7 +110,7 @@ class EnotifyService:
         for health in self.runtimes.health():
             source = (str(health.get("provider", "default")), str(health.get("source", "default")))
             current = health.get("error")
-            if self.reported_health.get(source) == current:
+            if source in self.reported_health and self.reported_health[source] == current:
                 continue
             if current:
                 print(f"enotify runtime status: {current}", file=sys.stderr)

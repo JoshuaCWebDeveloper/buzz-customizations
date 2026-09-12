@@ -6,8 +6,9 @@ from unittest.mock import patch
 
 from enotify.models import EventTriggerSpec, NotificationAddressSpec
 from enotify.providers.events.interface import EventOccurrence
+from enotify.providers.events.typing import BuzzTypingTransitionsProvider
 from enotify.providers.notifications import SendResult
-from enotify.runtime import RuntimeRegistry, WakeCoordinator
+from enotify.runtime import RuntimeBackend, RuntimeRegistry, WakeCoordinator, default_runtime_registry
 from enotify.service import EnotifyService
 from enotify.storage import Store
 from enotify.worker import Worker
@@ -169,6 +170,24 @@ class PlainProvider:
         self.stops += 1
 
 
+class MissingHealthBackend:
+    def __init__(self, **_):
+        return None
+    def start(self):
+        return None
+    def next_deadline(self, now):
+        return None
+    def stop(self):
+        return None
+
+
+class EmptyTypingStream:
+    def poll(self):
+        return []
+    def health(self):
+        return {"ready": True, "error": None}
+
+
 class RuntimeTests(unittest.TestCase):
     def open_store(self, directory, extension=None):
         return Store(Path(directory) / "state.sqlite", extensions={("fake", "stateful"): extension} if extension else {})
@@ -244,6 +263,47 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(provider.stops, 0)
         second.stop()
         self.assertEqual(provider.stops, 1)
+
+    def test_registry_rejects_backend_missing_required_method_at_bind(self):
+        provider = PlainProvider()
+        registry = RuntimeRegistry(WakeCoordinator())
+        registry.register("plain", "stateless", MissingHealthBackend)
+        with self.assertRaisesRegex(TypeError, "missing required runtime methods: health"):
+            registry.bind(provider)
+
+    def test_production_typing_backend_health_and_service_step(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open_store(directory)
+            store.open()
+            config = {"community": "community", "channel": "channel", "author": "author"}
+            event = EventTriggerSpec("buzz", "typing-transitions", 1, config)
+            notification = NotificationAddressSpec("buzz", "message", 1, {"community": "community", "channel": "channel"})
+            subscription = store.create("all", event, notification)
+
+            class TestTypingProvider(BuzzTypingTransitionsProvider):
+                def __init__(self, config=None):
+                    super().__init__(config=config, stream=EmptyTypingStream())
+                def _verify_community(self, channel):
+                    return None
+
+            registry = default_runtime_registry(WakeCoordinator())
+            provider = TestTypingProvider(config)
+            handle = registry.bind(provider, store=store, subscription=subscription)
+            self.assertTrue(isinstance(registry._backends[next(iter(registry._backends))][0], RuntimeBackend))
+            health = registry.health()
+            self.assertEqual(health[0]["provider"], "buzz")
+            self.assertIn("ready", health[0])
+
+            service = EnotifyService(store, registry)
+            service.bindings[subscription["id"]] = (
+                (subscription["revision"], "buzz", "typing-transitions", "typing-transitions", provider.source, repr(sorted(config.items()))),
+                handle,
+            )
+            service.step()
+            self.assertEqual(set(service.reported_health), {("buzz", provider.source)})
+            handle.stop()
+            registry.close()
+            store.close()
 
     def test_supervisor_exception_cleans_handles_restores_signals_and_closes_store(self):
         with tempfile.TemporaryDirectory() as directory:
