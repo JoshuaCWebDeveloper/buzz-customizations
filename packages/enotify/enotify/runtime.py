@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 import threading
 import time
 
 from .providers.events.interface import EventOccurrence
 
 
+@runtime_checkable
 class EventRuntime(Protocol):
     """A subscription binding to a registry-owned provider backend."""
 
@@ -21,6 +22,16 @@ class EventRuntime(Protocol):
     def advance(self, observed_at: int) -> Iterable[EventOccurrence]: ...
     def next_deadline(self, observed_at: int) -> int | None: ...
     def ack(self, occurrence: EventOccurrence) -> None: ...
+    def health(self) -> dict[str, Any]: ...
+    def stop(self) -> None: ...
+
+
+@runtime_checkable
+class RuntimeBackend(Protocol):
+    """Shared provider backend contract checked before entering the service loop."""
+
+    def start(self) -> None: ...
+    def next_deadline(self, observed_at: int) -> int | None: ...
     def health(self) -> dict[str, Any]: ...
     def stop(self) -> None: ...
 
@@ -117,7 +128,15 @@ class RuntimeRegistry:
         self._factories: dict[tuple[str, str], Callable[..., EventRuntime]] = {}
 
     def register(self, provider: str, capability: str, factory: Callable[..., EventRuntime]) -> None:
+        if not callable(factory):
+            raise TypeError(f"runtime factory for {provider}/{capability} is not callable")
         self._factories[(provider, capability)] = factory
+
+    @staticmethod
+    def _require_runtime_methods(runtime: Any, kind: str, methods: tuple[str, ...]) -> None:
+        missing = [name for name in methods if not callable(getattr(runtime, name, None))]
+        if missing:
+            raise TypeError(f"{kind} is missing required runtime methods: {', '.join(missing)}")
 
     def bind(self, provider: Any, **kwargs: Any) -> RuntimeHandle:
         key = (provider.provider, provider.capability, getattr(provider, "source", "default"))
@@ -125,9 +144,21 @@ class RuntimeRegistry:
         if current is None:
             factory = self._factories.get((provider.provider, provider.capability))
             runtime = factory(provider=provider, wake=self.wake.signal, **kwargs) if factory else GenericProviderRuntime(provider, self.wake.signal)
+            self._require_runtime_methods(runtime, "runtime backend", ("start", "next_deadline", "health", "stop"))
             runtime.start()
             current = (runtime, 0)
         runtime, refs = current
+        has_binding = hasattr(runtime, "bind")
+        try:
+            binding = runtime.bind(**kwargs) if has_binding else runtime
+            if not has_binding:
+                self._require_runtime_methods(binding, "runtime", ("start", "observe", "advance", "next_deadline", "ack", "health", "stop"))
+            else:
+                self._require_runtime_methods(binding, "runtime binding", ("start", "observe", "advance", "next_deadline", "ack", "health", "stop"))
+        except Exception:
+            if refs == 0:
+                runtime.stop()
+            raise
         self._backends[key] = (runtime, refs + 1)
 
         def release() -> None:
@@ -140,9 +171,6 @@ class RuntimeRegistry:
             else:
                 del self._backends[key]
                 backend.stop()
-
-        has_binding = hasattr(runtime, "bind")
-        binding = runtime.bind(**kwargs) if has_binding else runtime
         return RuntimeHandle(binding, release, has_binding, _started=not has_binding)
 
     def deadlines(self, wall_now: int) -> list[int]:

@@ -62,6 +62,14 @@ class BuzzTypingRuntimeBackend:
     def bind(self, subscription: dict[str, Any], **_: Any) -> BuzzTypingRuntimeHandle:
         return BuzzTypingRuntimeHandle(self, subscription)
 
+    def next_deadline(self, observed_at: int) -> int | None:
+        return self.repository.deadline()
+
+    def health(self) -> dict[str, Any]:
+        stream = getattr(self.provider, "_stream", None)
+        health = stream.health() if stream is not None and hasattr(stream, "health") else {"ready": True, "error": None}
+        return {"provider": self.provider.provider, "source": self.provider.source, **health}
+
     def stop(self) -> None:
         if self._key is not None:
             _stream_pool.release(self._key, self._wake)
