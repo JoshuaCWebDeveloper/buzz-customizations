@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from enotify.models import EventTriggerSpec, NotificationAddressSpec
 from enotify.providers.events.interface import EventOccurrence
-from enotify.providers.events.typing import BuzzTypingTransitionsProvider
+from enotify.typing.provider import BuzzTypingTransitionsProvider
 from enotify.providers.notifications import SendResult
 from enotify.runtime import RuntimeBackend, RuntimeRegistry, WakeCoordinator, default_runtime_registry
 from enotify.service import EnotifyService
