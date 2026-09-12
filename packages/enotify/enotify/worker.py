@@ -39,7 +39,11 @@ class Worker:
             handle = (self.runtime_registry or default_runtime_registry()).bind(handle, store=self.store, subscription=subscription)
             owned = True
         try:
-            handle.start()
+            # Service-managed handles are started when they are bound.  A
+            # standalone Worker still starts an unstarted handle, while
+            # repeated service passes only observe/advance it.
+            if not getattr(handle, "_started", False):
+                handle.start()
             observed_at = self.clock()
             cursor = self.store.checkpoint(handle.provider, handle.source)
             for occurrence in handle.advance(observed_at):
