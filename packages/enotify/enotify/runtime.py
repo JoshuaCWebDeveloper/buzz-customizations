@@ -45,11 +45,23 @@ class WakeCoordinator:
 class RuntimeHandle:
     runtime: EventRuntime
     release: Callable[[], None]
+    _started: bool = False
+    _stopped: bool = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.runtime, name)
 
+    def start(self) -> None:
+        if self._started:
+            return
+        self.runtime.start()
+        self._started = True
+
     def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        self.runtime.stop()
         self.release()
 
 
@@ -127,12 +139,19 @@ class RuntimeRegistry:
                 del self._backends[key]
                 backend.stop()
 
-        binding = runtime.bind(**kwargs) if hasattr(runtime, "bind") else runtime
-        return RuntimeHandle(binding, release)
+        has_binding = hasattr(runtime, "bind")
+        binding = runtime.bind(**kwargs) if has_binding else runtime
+        return RuntimeHandle(binding, release, _started=not has_binding)
 
-    def deadlines(self, now: int) -> list[int]:
+    def deadlines(self, wall_now: int) -> list[int]:
         return [deadline for runtime, _ in self._backends.values()
-                if (deadline := runtime.next_deadline(now)) is not None]
+                if (deadline := runtime.next_deadline(wall_now)) is not None]
+
+    def wait_timeout(self, interval: float, wall_now: float, monotonic_now: float) -> float:
+        """Convert provider wall-clock deadlines into one monotonic wait."""
+        waits = [max(0.0, float(deadline) - wall_now) for deadline in self.deadlines(int(wall_now))]
+        deadline_mono = monotonic_now + min(waits) if waits else None
+        return interval if deadline_mono is None else max(0.0, min(interval, deadline_mono - monotonic_now))
 
     def health(self) -> list[dict[str, Any]]:
         return [runtime.health() for runtime, _ in self._backends.values()]
