@@ -40,13 +40,13 @@ import os
 from pathlib import Path
 
 home = Path(os.environ["CODEX_HOME"])
-config = json.loads((home / "hooks.json").read_text())
-command = config["hooks"]["UserPromptSubmit"][-1]["hooks"][0]["command"]
 for line in __import__("sys").stdin:
     request = json.loads(line)
     if request.get("id") == 1:
         print(json.dumps({"id": 1, "result": {"codexHome": str(home)}}), flush=True)
     elif request.get("id") == 2:
+        config = json.loads((home / "hooks.json").read_text())
+        command = config["hooks"]["UserPromptSubmit"][-1]["hooks"][0]["command"]
         groups = config["hooks"]["UserPromptSubmit"]
         group_index = next(index for index, group in enumerate(groups) if group.get("__buzz_customization") == "buzz-customizations/channel-context")
         key = f"{(home / 'hooks.json').resolve()}:user_prompt_submit:{group_index}:0"

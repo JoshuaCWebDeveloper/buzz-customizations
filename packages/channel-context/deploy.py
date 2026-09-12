@@ -95,7 +95,7 @@ def _hook_identity(home: Path, hook_path: Path, codex_bin: str) -> tuple:
     environment["CODEX_HOME"] = str(home)
     process = subprocess.Popen(
         [codex_bin, "app-server"],
-        text=True,
+        bufsize=0,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -105,19 +105,25 @@ def _hook_identity(home: Path, hook_path: Path, codex_bin: str) -> tuple:
     expected_source = str((home / "hooks.json").resolve())
     try:
         assert process.stdin is not None and process.stdout is not None
-        process.stdin.write(requests)
+        process.stdin.write(requests.encode())
         process.stdin.flush()
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
+        pending = b""
         events = selector.select(APP_SERVER_TIMEOUT_SECONDS)
         while events:
-            line = process.stdout.readline()
-            try:
-                response = json.loads(line)
-            except json.JSONDecodeError:
-                events = selector.select(APP_SERVER_TIMEOUT_SECONDS)
-                continue
-            if response.get("id") == 2:
+            chunk = os.read(process.stdout.fileno(), 4096)
+            if not chunk:
+                break
+            pending += chunk
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                try:
+                    response = json.loads(line.decode())
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if response.get("id") != 2:
+                    continue
                 for entry in response.get("result", {}).get("data", []):
                     for hook in entry.get("hooks", []):
                         if (
@@ -129,7 +135,7 @@ def _hook_identity(home: Path, hook_path: Path, codex_bin: str) -> tuple:
                             current_hash = hook.get("currentHash")
                             if isinstance(key, str) and isinstance(current_hash, str):
                                 return key, current_hash
-                break
+                raise RuntimeError("Codex did not report the installed channel-context hook")
             events = selector.select(APP_SERVER_TIMEOUT_SECONDS)
     finally:
         process.terminate()
