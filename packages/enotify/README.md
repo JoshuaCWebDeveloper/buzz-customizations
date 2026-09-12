@@ -78,6 +78,23 @@ For `one`, a partial unique index admits only one open reservation. Retryable fa
 
 External services may still duplicate a send if they cannot deduplicate the stable delivery key and a crash occurs after external acceptance but before the local receipt commit. This package makes no exactly-once claim.
 
+## Provider runtime and state extensions
+
+The Worker and long-lived service operate only on the provider-agnostic runtime
+contract. A runtime handle is subscription-scoped, while the runtime registry
+owns one shared backend per provider observation group and releases it only after
+the final handle stops. One service-level wake coordinator combines runtime
+wakes and monotonic deadlines; provider event timestamps remain wall-clock data.
+
+Provider-specific durable state belongs to a typed storage extension registered
+with the provider runtime. Extensions receive a narrowly scoped Store-owned
+transaction capability, so provider projection, cursor, consumer, and common
+occurrence writes can commit atomically without provider I/O in the transaction.
+The Buzz typing extension wraps the existing projection and consumer tables;
+no migration is required for this boundary. Other stateful providers can
+register their own typed repository and runtime without adding methods or
+branches to the core Store or Worker.
+
 ## Deploy and undeploy scaffolding
 
 ```bash

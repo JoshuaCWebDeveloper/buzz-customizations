@@ -156,7 +156,7 @@ class BuzzTypingLiveStream:
         self._clock = clock or time.monotonic
         self._wake_callback = wake or (lambda: None)
         self._child: Any = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._stop = stop_event or threading.Event()
         self._wake = threading.Event()
         self._backlog: deque[dict[str, Any]] = deque(maxlen=STREAM_BACKLOG_LIMIT)
@@ -330,10 +330,11 @@ class _RunnerTypingLiveStream:
 
 class _TypingStreamPool:
     def __init__(self, stream_factory: Callable[..., BuzzTypingLiveStream] | None = None):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._wake = threading.Event()
         self._stream_factory = stream_factory or BuzzTypingLiveStream
         self._streams: dict[tuple[str, str, str], BuzzTypingLiveStream] = {}
+        self._refs: dict[tuple[str, str, str], int] = {}
 
     def stream(self, community: str, channel: str, author: str, executable: str | None = None) -> BuzzTypingLiveStream:
         key = (community, channel, author)
@@ -347,6 +348,24 @@ class _TypingStreamPool:
                 self._streams[key] = stream
             self._wake.set()
             return stream
+
+    def acquire(self, community: str, channel: str, author: str, executable: str | None = None) -> BuzzTypingLiveStream:
+        key = (community, channel, author)
+        with self._lock:
+            stream = self.stream(community, channel, author, executable)
+            self._refs[key] = self._refs.get(key, 0) + 1
+            return stream
+
+    def release(self, key: tuple[str, str, str]) -> None:
+        with self._lock:
+            count = self._refs.get(key, 0)
+            if count > 1:
+                self._refs[key] = count - 1
+                return
+            self._refs.pop(key, None)
+            stream = self._streams.pop(key, None)
+        if stream is not None:
+            stream.close()
 
     def prune(self, active: set[tuple[str, str, str]]) -> None:
         with self._lock:
@@ -371,6 +390,7 @@ class _TypingStreamPool:
         with self._lock:
             streams = list(self._streams.values())
             self._streams.clear()
+            self._refs.clear()
         for stream in streams:
             stream.close()
 

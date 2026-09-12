@@ -11,8 +11,8 @@ from pathlib import Path
 
 from enotify.models import EventTriggerSpec, NotificationAddressSpec
 from enotify.providers.events.registry import default_registry as event_registry
-from enotify.providers.events.typing import close_typing_streams, prune_typing_streams, typing_stream_health, wait_for_typing_activity, wake_typing_streams
 from enotify.providers.notifications.registry import default_registry as notification_registry
+from enotify.runtime import default_runtime_registry
 from enotify.storage import Store
 from enotify.worker import Worker
 
@@ -20,23 +20,9 @@ from enotify.worker import Worker
 stopping = False
 
 
-def report_typing_health(health: dict, reported: dict[tuple, str | None]) -> None:
-    source = tuple(health.get("source", ()))
-    current = health.get("error")
-    previous = reported.get(source)
-    if current == previous:
-        return
-    if current:
-        print(f"enotify typing stream status: {current}", file=sys.stderr)
-    elif previous:
-        print("enotify typing stream status: recovered", file=sys.stderr)
-    reported[source] = current
-
-
 def stop(_signum, _frame):
     global stopping
     stopping = True
-    wake_typing_streams()
 
 
 def main() -> int:
@@ -46,39 +32,51 @@ def main() -> int:
     interval = max(1, int(os.environ.get("ENOTIFY_POLL_SECONDS", "15")))
     store = Store(database)
     store.open()
+    runtimes = default_runtime_registry()
+    bindings = {}
     reported_health = {}
     try:
         while not stopping:
             store.reclaim_expired()
-            active_streams = set()
+            active_ids = set()
             for subscription in store.list("active"):
+                active_ids.add(subscription["id"])
                 try:
                     event = EventTriggerSpec.from_mapping(subscription["event_trigger"])
                     notification = NotificationAddressSpec.from_mapping(subscription["notification_address"])
                     event_provider = event_registry().get(event.provider, event.event_type)
-                    if event.provider == "buzz" and event.event_type == "typing-transitions":
-                        active_streams.add((event.match["community"], event.match["channel"], event.match["author"]))
-                    notification_provider = notification_registry().get(notification.provider, notification.notification_type)
                     event_provider = type(event_provider)(config=dict(event.match))
+                    notification_provider = notification_registry().get(notification.provider, notification.notification_type)
                     notification_provider = type(notification_provider)(config=dict(notification.address))
-                    Worker(store, event_provider, notification_provider).process(
+                    binding = bindings.get(subscription["id"])
+                    if binding is None:
+                        binding = runtimes.bind(event_provider, store=store, subscription=subscription)
+                        bindings[subscription["id"]] = binding
+                    Worker(store, binding, notification_provider, runtime_registry=runtimes).process(
                         subscription,
-                        notification_provider.render
-                        if hasattr(notification_provider, "render")
+                        notification_provider.render if hasattr(notification_provider, "render")
                         else lambda occurrence: json.dumps(occurrence.payload or {}, sort_keys=True),
                     )
                 except Exception as exc:
                     print(f"enotify provider unavailable: {type(exc).__name__}", file=sys.stderr)
-            prune_typing_streams(active_streams)
-            for health in typing_stream_health():
-                report_typing_health(health, reported_health)
-            due = store.typing_due()
-            timeout = interval if due is None else max(0, min(interval, due - int(time.time())))
-            # A live typing reader wakes the scheduler as soon as a tick
-            # arrives; durable deadlines remain the other wake boundary.
-            wait_for_typing_activity(timeout)
+            for subscription_id in set(bindings) - active_ids:
+                bindings.pop(subscription_id).stop()
+            for health in runtimes.health():
+                source = str(health.get("source", "default"))
+                current = health.get("error")
+                if reported_health.get(source) == current:
+                    continue
+                if current:
+                    print(f"enotify runtime status: {current}", file=sys.stderr)
+                elif source in reported_health:
+                    print("enotify runtime status: recovered", file=sys.stderr)
+                reported_health[source] = current
+            now = int(time.time())
+            deadlines = runtimes.deadlines(now)
+            timeout = interval if not deadlines else max(0, min(interval, min(deadlines) - now))
+            runtimes.wake.wait(timeout)
     finally:
-        close_typing_streams()
+        runtimes.close()
         store.close()
     return 0
 
