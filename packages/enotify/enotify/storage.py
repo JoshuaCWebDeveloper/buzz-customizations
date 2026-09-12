@@ -150,26 +150,40 @@ class Store:
         subscription_id = str(uuid.uuid4())
         stamp = now()
         with self._transaction() as db:
-            db.execute(
-                "INSERT INTO subscriptions VALUES(?,?,?,?,?,?,?,?,?)",
-                (
-                    subscription_id,
-                    1,
-                    frequency,
-                    canonical_json(event.envelope()),
-                    canonical_json(notification.envelope()),
-                    "active",
-                    None,
-                    stamp,
-                    stamp,
-                ),
-            )
+            event_json = canonical_json(event.envelope())
+            notification_json = canonical_json(notification.envelope())
+            if frequency == "all":
+                existing = self._active_all_conflict(db, event_json, notification_json)
+                if existing is not None:
+                    raise Conflict(f"frequency=all subscription already exists: {existing['id']}")
+            try:
+                db.execute(
+                    "INSERT INTO subscriptions VALUES(?,?,?,?,?,?,?,?,?)",
+                    (subscription_id, 1, frequency, event_json, notification_json,
+                     "active", None, stamp, stamp),
+                )
+            except sqlite3.IntegrityError as exc:
+                if frequency == "all":
+                    existing = self._active_all_conflict(db, event_json, notification_json)
+                    if existing is not None:
+                        raise Conflict(f"frequency=all subscription already exists: {existing['id']}") from exc
+                raise
             if event.provider == "buzz" and event.event_type == "typing-transitions":
                 source = typing_source(dict(event.match))
                 checkpoint = db.execute("SELECT cursor FROM provider_checkpoints WHERE provider=? AND source=?", ("buzz", source)).fetchone()
                 db.execute("INSERT INTO typing_consumers(subscription_id,source,eligible_after,cursor,updated_at,revision,cursor_occurrence_id) VALUES(?,?,?,?,?,?,?)", (subscription_id, source, stamp, int(checkpoint[0]) if checkpoint else 0, stamp, 1, ""))
             self.audit("subscription.create", subscription_id, {"frequency": frequency})
         return self.get(subscription_id)
+
+    @staticmethod
+    def _active_all_conflict(db: sqlite3.Connection, event_json: str, notification_json: str) -> sqlite3.Row | None:
+        return db.execute(
+            """SELECT id FROM subscriptions
+               WHERE frequency='all' AND state IN ('active','paused')
+                 AND event_json=? AND notification_json=?
+               ORDER BY created_at,id LIMIT 1""",
+            (event_json, notification_json),
+        ).fetchone()
 
     def get(self, subscription_id: str) -> dict[str, Any]:
         return self._subscription(
@@ -204,12 +218,19 @@ class Store:
             notification.envelope() if notification else old["notification_address"]
         )
         with self._transaction() as db:
-            cursor = db.execute(
-                """UPDATE subscriptions
-                   SET frequency=?,event_json=?,notification_json=?,revision=revision+1,updated_at=?
-                   WHERE id=? AND revision=? AND state NOT IN ('finished','dead','deleted')""",
-                (frequency, event_json, notification_json, now(), subscription_id, expected),
-            )
+            try:
+                cursor = db.execute(
+                    """UPDATE subscriptions
+                       SET frequency=?,event_json=?,notification_json=?,revision=revision+1,updated_at=?
+                       WHERE id=? AND revision=? AND state NOT IN ('finished','dead','deleted')""",
+                    (frequency, event_json, notification_json, now(), subscription_id, expected),
+                )
+            except sqlite3.IntegrityError as exc:
+                if frequency == "all":
+                    existing = self._active_all_conflict(db, event_json, notification_json)
+                    if existing is not None and existing["id"] != subscription_id:
+                        raise Conflict(f"frequency=all subscription already exists: {existing['id']}") from exc
+                raise
             if cursor.rowcount != 1:
                 raise Conflict("revision conflict or terminal subscription")
             old_typing = old["event_trigger"].get("provider") == "buzz" and old["event_trigger"].get("event_type") == "typing-transitions"

@@ -1,4 +1,4 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 import sqlite3
@@ -30,6 +30,10 @@ class CliTests(unittest.TestCase):
                 "provider": "buzz", "notification_type": "message",
                 "address": {"community": "community", "channel": "channel"},
             })
+            alternate_event = json.dumps({
+                "provider": "buzz", "event_type": "typing-transitions",
+                "match": {"community": "community", "channel": "channel", "author": "other-author"},
+            })
             def create(*extra):
                 output = StringIO()
                 with redirect_stdout(output):
@@ -41,7 +45,13 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(create()["frequency"], "all")
             self.assertEqual(create("--frequency", "one")["frequency"], "one")
-            self.assertEqual(create("--frequency", "all")["frequency"], "all")
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(cli.main([
+                    "--db", str(database), "subscription", "create", "--frequency", "all",
+                    "--event-spec", alternate_event, "--notification-spec", notification,
+                ]), 0)
+            self.assertEqual(json.loads(output.getvalue())["frequency"], "all")
             with sqlite3.connect(database) as connection:
                 self.assertEqual(
                     connection.execute(
@@ -116,6 +126,41 @@ class CliTests(unittest.TestCase):
             self.assertEqual(created["event_trigger"]["match"]["history_limit"], 1000)
             self.assertEqual(created["notification_address"]["schema_version"], 1)
             self.assertNotIn("mention", created["notification_address"]["address"])
+
+    def test_equivalent_specs_with_explicit_defaults_conflict(self):
+        cli = load_cli()
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite"
+            first_event = json.dumps({
+                "provider": "buzz", "event_type": "typing-transitions",
+                "match": {"author": "author", "channel": "channel", "community": "community"},
+            })
+            equivalent_event = json.dumps({
+                "schema_version": 1, "event_type": "typing-transitions", "provider": "buzz",
+                "match": {"history_limit": 1000, "ttl": 8, "community": "community", "author": "author", "channel": "channel"},
+            })
+            first_notification = json.dumps({
+                "provider": "buzz", "notification_type": "message",
+                "address": {"channel": "channel", "community": "community"},
+            })
+            equivalent_notification = json.dumps({
+                "address": {"community": "community", "channel": "channel"},
+                "schema_version": 1, "notification_type": "message", "provider": "buzz",
+            })
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(cli.main([
+                    "--db", str(database), "subscription", "create",
+                    "--event-spec", first_event, "--notification-spec", first_notification,
+                ]), 0)
+            first = json.loads(output.getvalue())
+            error = StringIO()
+            with redirect_stderr(error), redirect_stdout(StringIO()):
+                self.assertEqual(cli.main([
+                    "--db", str(database), "subscription", "create",
+                    "--event-spec", equivalent_event, "--notification-spec", equivalent_notification,
+                ]), 3)
+            self.assertIn(first["id"], error.getvalue())
 
     def test_provider_inspection_and_json_file_crud(self):
         cli = load_cli()

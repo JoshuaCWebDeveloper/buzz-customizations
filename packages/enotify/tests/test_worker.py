@@ -140,7 +140,10 @@ class WorkerTests(unittest.TestCase):
             match = {"community": "c", "channel": "ch", "author": "a", "ttl": 8}
             event = event.__class__("buzz", "typing-transitions", 1, match)
             first = store.create("all", event, notification)
-            second = store.create("all", event, notification)
+            second_notification = notification.__class__(
+                "buzz", "message", 1, {"community": "community", "channel": "other-channel"}
+            )
+            second = store.create("all", event, second_notification)
             rows = [{"id": "tick-1", "kind": 20002, "pubkey": "a", "created_at": 100, "tags": [["h", "ch"]]}]
             def run(command, **kwargs):
                 class Result: pass

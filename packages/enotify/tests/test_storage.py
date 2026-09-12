@@ -1,4 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,12 +23,12 @@ class StorageTests(unittest.TestCase):
     def test_migrations_are_repeatable_and_wal_enabled(self):
         with tempfile.TemporaryDirectory() as directory:
             first = self.open_store(directory)
-            self.assertEqual(first.status()["migration_version"], 5)
+            self.assertEqual(first.status()["migration_version"], 6)
             self.assertEqual(first.status()["journal_mode"], "wal")
             first.close()
             second = self.open_store(directory)
             self.assertEqual(
-                second.db.execute("SELECT COUNT(*) FROM migrations").fetchone()[0], 5
+                second.db.execute("SELECT COUNT(*) FROM migrations").fetchone()[0], 6
             )
             second.close()
 
@@ -68,8 +70,89 @@ class StorageTests(unittest.TestCase):
                 reloaded.get(subscription["id"])["notification_address"]["address"]["content"],
                 "{author} has {direction} working",
             )
-            self.assertEqual(reloaded.status()["migration_version"], 5)
+            self.assertEqual(reloaded.status()["migration_version"], 6)
             reloaded.close()
+
+    def test_matching_active_all_is_rejected_but_one_repeats(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open_store(directory)
+            event, notification = specs()
+            first = store.create("all", event, notification)
+            with self.assertRaisesRegex(Conflict, first["id"]):
+                store.create("all", event, notification)
+            second = store.create("one", event, notification)
+            third = store.create("one", event, notification)
+            self.assertNotEqual(second["id"], third["id"])
+            store.close()
+
+    def test_paused_all_blocks_and_deleted_all_can_be_recreated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open_store(directory)
+            event, notification = specs()
+            paused = store.create("all", event, notification)
+            paused = store.transition(paused["id"], "pause", paused["revision"])
+            with self.assertRaisesRegex(Conflict, paused["id"]):
+                store.create("all", event, notification)
+            deleted = store.transition(paused["id"], "delete", paused["revision"])
+            self.assertEqual(deleted["state"], "deleted")
+            recreated = store.create("all", event, notification)
+            self.assertNotEqual(recreated["id"], paused["id"])
+            store.close()
+
+    def test_migration_retires_duplicate_all_rows_without_deleting_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old_migrations = Path(directory) / "old-migrations"
+            old_migrations.mkdir()
+            package_migrations = Path(__file__).parents[1] / "migrations"
+            for path in sorted(package_migrations.glob("00[1-5]_*.sql")):
+                shutil.copy2(path, old_migrations / path.name)
+            database = Path(directory) / "legacy.sqlite"
+            legacy = Store(database, old_migrations)
+            legacy.open()
+            event, notification = specs()
+            event_json = json.dumps(event.envelope(), sort_keys=True, separators=(",", ":"))
+            notification_json = json.dumps(notification.envelope(), sort_keys=True, separators=(",", ":"))
+            legacy.db.executemany(
+                "INSERT INTO subscriptions VALUES(?,?,?,?,?,?,?,?,?)",
+                [
+                    ("older", 1, "all", event_json, notification_json, "active", None, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+                    ("newer", 1, "all", event_json, notification_json, "paused", None, "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z"),
+                ],
+            )
+            legacy.close()
+            store = Store(database)
+            store.open()
+            rows = store.db.execute("SELECT id,state,reason FROM subscriptions ORDER BY id").fetchall()
+            self.assertEqual(
+                [(row["id"], row["state"], row["reason"]) for row in rows],
+                [("newer", "deleted", "duplicate_frequency_all"), ("older", "active", None)],
+            )
+            with self.assertRaisesRegex(Conflict, "older"):
+                store.create("all", event, notification)
+            self.assertEqual(store.db.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0], 2)
+            store.close()
+
+    def test_concurrent_matching_all_creates_have_one_winner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            seed = self.open_store(directory)
+            event, notification = specs()
+            seed.close()
+
+            def create(_):
+                store = self.open_store(directory)
+                try:
+                    return store.create("all", event, notification)
+                except Conflict as exc:
+                    return str(exc)
+                finally:
+                    store.close()
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(create, (1, 2)))
+            self.assertEqual(sum(isinstance(result, dict) for result in results), 1)
+            winner = next(result for result in results if isinstance(result, dict))
+            loser = next(result for result in results if isinstance(result, str))
+            self.assertIn(winner["id"], loser)
 
     def test_single_winner_one_reservation_under_concurrency(self):
         with tempfile.TemporaryDirectory() as directory:
