@@ -41,9 +41,10 @@ explicit alternate state store:
 enotify provider list
 enotify provider describe event github check
 enotify subscription create \
-  --frequency one \
   --event-spec event.json \
   --notification-spec notification.json
+# Omit --frequency for the default `all`; pass `--frequency one` explicitly
+# when the subscription should stop after its first accepted delivery.
 enotify subscription update SUBSCRIPTION_ID \
   --if-revision 1 \
   --event-spec event.json

@@ -63,7 +63,12 @@ def parser() -> argparse.ArgumentParser:
     subscriptions = commands.add_parser("subscription")
     subscription_commands = subscriptions.add_subparsers(dest="action", required=True)
     create = subscription_commands.add_parser("create")
-    create.add_argument("--frequency", choices=("one", "all"), required=True)
+    create.add_argument(
+        "--frequency",
+        choices=("one", "all"),
+        default="all",
+        help="delivery frequency (default: all)",
+    )
     create.add_argument("--event-spec", required=True, metavar="JSON|FILE|-")
     create.add_argument("--notification-spec", required=True, metavar="JSON|FILE|-")
 
