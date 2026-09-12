@@ -61,6 +61,7 @@ for line in __import__("sys").stdin:
 
 def deploy_command(action: str, home: Path, hook: Path = HOOK, runtime: str = "all") -> list:
     grok_home = home / "custom-grok-acp.d"
+    claude_config_dir = home / "claude-code"
     context_home = home / "shared-context"
     command = [
         sys.executable,
@@ -70,6 +71,8 @@ def deploy_command(action: str, home: Path, hook: Path = HOOK, runtime: str = "a
         str(home),
         "--custom-grok-acp-home",
         str(grok_home),
+        "--claude-config-dir",
+        str(claude_config_dir),
         "--context-home",
         str(context_home),
         "--runtime",
@@ -131,6 +134,30 @@ class HookTests(unittest.TestCase):
             result = json.loads(output.stdout)
             self.assertEqual(result["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
             self.assertEqual(result["hookSpecificOutput"]["additionalContext"], "contract context")
+
+    def test_accepts_claude_code_user_prompt_submit_contract(self):
+        """Payload shape captured from a live Claude Code 2.1.240 UserPromptSubmit hook.
+
+        Claude Code sends `hook_event_name` plus `prompt` as a plain string, exactly like Codex, so
+        the same handler serves both. It adds `prompt_id` and omits Codex's `agent_id`/`turn_id`.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            write_context(home, "claude contract context")
+            payload = {
+                "session_id": "46e5d9a8-5cac-4176-8cdf-34c27866c860",
+                "transcript_path": "/transcripts/session.jsonl",
+                "cwd": "/workspace",
+                "prompt_id": "48c39128-5eb5-4eb0-bef3-6308f65304de",
+                "permission_mode": "default",
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": f"Say hi.\n\n[Context]\nScope: channel\nChannel: buzz-customizations (#{UUID})\nHint: probe\n",
+            }
+            output = run_hook(payload, home)
+            self.assertEqual(output.returncode, 0)
+            result = json.loads(output.stdout)
+            self.assertEqual(result["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+            self.assertEqual(result["hookSpecificOutput"]["additionalContext"], "claude contract context")
 
     def test_accepts_live_buzz_channel_uuid_with_hash_prefix(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -317,6 +344,91 @@ class DeploymentTests(unittest.TestCase):
                     deploy.write_atomic(path, {"hooks": {"Stop": [{"hooks": []}]}})
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(list(path.parent.glob(".hooks.json.*")), [])
+
+
+class ClaudeDeploymentTests(unittest.TestCase):
+    def settings(self, home: Path) -> Path:
+        return home / "claude-code" / "settings.json"
+
+    def test_install_preserves_unrelated_settings_and_uninstall_removes_only_ours(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = self.settings(home)
+            path.parent.mkdir(parents=True)
+            # settings.json is shared by every Claude agent using this config dir and carries far
+            # more than hooks, so losing an unrelated key here is worse than for the other runtimes.
+            original = {
+                "permissions": {"allow": ["Bash(git status:*)"]},
+                "env": {"FOO": "bar"},
+                "model": "opus",
+                "hooks": {
+                    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "keep"}]}],
+                    "Stop": [{"hooks": [{"type": "command", "command": "keep-stop"}]}],
+                },
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            subprocess.run(deploy_command("install", home, runtime="claude"), check=True)
+            installed = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(installed["permissions"], original["permissions"])
+            self.assertEqual(installed["env"], original["env"])
+            self.assertEqual(installed["model"], original["model"])
+            self.assertEqual(installed["hooks"]["Stop"], original["hooks"]["Stop"])
+            self.assertEqual(installed["hooks"]["UserPromptSubmit"][0], original["hooks"]["UserPromptSubmit"][0])
+            ours = installed["hooks"]["UserPromptSubmit"][1]
+            self.assertEqual(ours["__buzz_customization"], "buzz-customizations/channel-context")
+            self.assertIn(str(HOOK.resolve()), ours["hooks"][0]["command"])
+            # additionalContextLimit is a Codex key; Claude Code does not define it.
+            self.assertNotIn("additionalContextLimit", ours["hooks"][0])
+            self.assertTrue(path.with_name("settings.json.buzz-customizations-backup").exists())
+            subprocess.run(deploy_command("uninstall", home, runtime="claude"), check=True)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+
+    def test_install_creates_settings_when_absent_and_uninstall_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = self.settings(home)
+            subprocess.run(deploy_command("uninstall", home, runtime="claude"), check=True)
+            self.assertFalse(path.exists())
+            subprocess.run(deploy_command("install", home, runtime="claude"), check=True)
+            installed = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(list(installed), ["hooks"])
+            self.assertEqual(len(installed["hooks"]["UserPromptSubmit"]), 1)
+            self.assertFalse(path.with_name("settings.json.buzz-customizations-backup").exists())
+
+    def test_repeated_install_keeps_one_group_and_the_original_backup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            path = self.settings(home)
+            path.parent.mkdir(parents=True)
+            original = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "keep"}]}]}}
+            path.write_text(json.dumps(original), encoding="utf-8")
+            subprocess.run(deploy_command("install", home, runtime="claude"), check=True)
+            backup = path.with_name("settings.json.buzz-customizations-backup")
+            first_backup = backup.read_bytes()
+            subprocess.run(deploy_command("install", home, runtime="claude"), check=True)
+            reinstalled = json.loads(path.read_text(encoding="utf-8"))
+            groups = [
+                group
+                for group in reinstalled["hooks"]["UserPromptSubmit"]
+                if group.get("__buzz_customization") == "buzz-customizations/channel-context"
+            ]
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(backup.read_bytes(), first_backup)
+            self.assertEqual(json.loads(backup.read_text(encoding="utf-8")), original)
+
+    def test_default_runtime_installs_claude_before_codex(self):
+        """`--runtime all` must reach Claude Code even when the Codex trust step aborts the run."""
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            command = deploy_command("install", home)
+            command[command.index("--codex-bin") + 1] = str(home / "missing-codex")
+            result = subprocess.run(command, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            installed = json.loads(self.settings(home).read_text(encoding="utf-8"))
+            self.assertEqual(
+                installed["hooks"]["UserPromptSubmit"][0]["__buzz_customization"],
+                "buzz-customizations/channel-context",
+            )
 
 
 class GrokAdapterIntegrationTests(unittest.TestCase):

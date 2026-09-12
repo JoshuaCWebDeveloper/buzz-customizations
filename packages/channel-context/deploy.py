@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install or remove channel-context for Codex and custom-grok-acp."""
+"""Install or remove channel-context for Codex, custom-grok-acp, and Claude Code."""
 
 import argparse
 import json
@@ -18,6 +18,7 @@ GROUP_MARKER = "buzz-customizations/channel-context"
 APP_SERVER_TIMEOUT_SECONDS = 15
 DEFAULT_CONTEXT_HOME = Path("/var/lib/buzz/channel-context")
 DEFAULT_GROK_ACP_HOME = Path("/var/lib/buzz-server/custom-grok-acp.d")
+DEFAULT_CLAUDE_CONFIG_DIR = Path("/var/lib/buzz/claude-code")
 
 
 def load(path: Path) -> dict:
@@ -26,7 +27,7 @@ def load(path: Path) -> dict:
     with path.open(encoding="utf-8") as handle:
         value = json.load(handle)
     if not isinstance(value, dict) or not isinstance(value.get("hooks", {}), dict):
-        raise ValueError("hooks.json must contain a JSON object with an object-valued hooks field")
+        raise ValueError(f"{path.name} must contain a JSON object with an object-valued hooks field")
     return value
 
 
@@ -233,7 +234,7 @@ def uninstall_codex(home: Path) -> None:
         write_bytes_atomic(codex_config_path, text.encode())
 
 
-def grok_hook_command(hook_path: Path) -> str:
+def python_hook_command(hook_path: Path) -> str:
     return f"{shlex.quote(sys.executable)} {shlex.quote(str(hook_path.resolve()))}"
 
 
@@ -247,7 +248,7 @@ def install_grok(home: Path, hook_path: Path) -> None:
     groups.append(
         {
             "__buzz_customization": GROUP_MARKER,
-            "hooks": [{"type": "command", "command": grok_hook_command(hook_path)}],
+            "hooks": [{"type": "command", "command": python_hook_command(hook_path)}],
         }
     )
     home.mkdir(parents=True, exist_ok=True)
@@ -264,6 +265,41 @@ def uninstall_grok(home: Path) -> None:
     write_atomic(config_path, config)
 
 
+def install_claude(config_dir: Path, hook_path: Path) -> None:
+    """Register the hook in Claude Code user settings.
+
+    Claude Code reads `UserPromptSubmit` from `$CLAUDE_CONFIG_DIR/settings.json` and honors the same
+    `hookSpecificOutput.additionalContext` contract as Codex, so the hook script is unchanged. There
+    is no hook-trust step, and `additionalContextLimit` is not a Claude Code key. `settings.json`
+    also carries permissions, env, and model for every Claude agent sharing this config dir, so the
+    unrelated keys `load` preserves matter more here than for the other runtimes.
+    """
+    config_path = config_dir / "settings.json"
+    config = load(config_path)
+    remove_groups(config, HOOK_NAME)
+    groups = config["hooks"].setdefault(HOOK_NAME, [])
+    if not isinstance(groups, list):
+        raise ValueError("hooks.UserPromptSubmit must be an array")
+    groups.append(
+        {
+            "__buzz_customization": GROUP_MARKER,
+            "hooks": [{"type": "command", "command": python_hook_command(hook_path)}],
+        }
+    )
+    config_dir.mkdir(parents=True, exist_ok=True)
+    backup_once(config_path)
+    write_atomic(config_path, config)
+
+
+def uninstall_claude(config_dir: Path) -> None:
+    config_path = config_dir / "settings.json"
+    if not config_path.exists():
+        return
+    config = load(config_path)
+    remove_groups(config, HOOK_NAME)
+    write_atomic(config_path, config)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("install", "uninstall"))
@@ -273,21 +309,31 @@ def main() -> int:
         default=os.environ.get("CUSTOM_GROK_ACP_HOME", str(DEFAULT_GROK_ACP_HOME)),
     )
     parser.add_argument(
+        "--claude-config-dir",
+        default=os.environ.get("CLAUDE_CONFIG_DIR", str(DEFAULT_CLAUDE_CONFIG_DIR)),
+    )
+    parser.add_argument(
         "--context-home",
         default=os.environ.get("BUZZ_CHANNEL_CONTEXT_HOME", str(DEFAULT_CONTEXT_HOME)),
     )
-    parser.add_argument("--runtime", choices=("all", "codex", "grok"), default="all")
+    parser.add_argument("--runtime", choices=("all", "codex", "grok", "claude"), default="all")
     parser.add_argument("--hook", default=str(Path(__file__).with_name("channel_context.py")))
     parser.add_argument("--codex-bin", default=os.environ.get("CODEX_PATH", "codex"))
     args = parser.parse_args()
     hook_path = Path(args.hook)
     if args.action == "install":
         ensure_context_home(Path(args.context_home))
+        # Claude Code runs first: it is the only runtime whose install cannot fail on an external
+        # process, and `install_codex` aborts the run when `codex app-server` does not report back.
+        if args.runtime in ("all", "claude"):
+            install_claude(Path(args.claude_config_dir), hook_path)
         if args.runtime in ("all", "codex"):
             install_codex(Path(args.codex_home), hook_path, args.codex_bin)
         if args.runtime in ("all", "grok"):
             install_grok(Path(args.custom_grok_acp_home), hook_path)
     else:
+        if args.runtime in ("all", "claude"):
+            uninstall_claude(Path(args.claude_config_dir))
         if args.runtime in ("all", "codex"):
             uninstall_codex(Path(args.codex_home))
         if args.runtime in ("all", "grok"):
