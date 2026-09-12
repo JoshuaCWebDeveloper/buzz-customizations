@@ -12,17 +12,20 @@ from pathlib import Path
 from enotify.models import EventTriggerSpec, NotificationAddressSpec
 from enotify.providers.events.registry import default_registry as event_registry
 from enotify.providers.notifications.registry import default_registry as notification_registry
-from enotify.runtime import default_runtime_registry
+from enotify.runtime import WakeCoordinator, default_runtime_registry
 from enotify.storage import Store
 from enotify.worker import Worker
 
 
 stopping = False
+service_wake: WakeCoordinator | None = None
 
 
 def stop(_signum, _frame):
     global stopping
     stopping = True
+    if service_wake is not None:
+        service_wake.signal()
 
 
 def main() -> int:
@@ -32,7 +35,9 @@ def main() -> int:
     interval = max(1, int(os.environ.get("ENOTIFY_POLL_SECONDS", "15")))
     store = Store(database)
     store.open()
-    runtimes = default_runtime_registry()
+    global service_wake
+    service_wake = WakeCoordinator()
+    runtimes = default_runtime_registry(service_wake)
     bindings = {}
     reported_health = {}
     try:
@@ -78,6 +83,7 @@ def main() -> int:
     finally:
         runtimes.close()
         store.close()
+        service_wake = None
     return 0
 
 

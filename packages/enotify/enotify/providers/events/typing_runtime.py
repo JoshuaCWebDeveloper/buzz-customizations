@@ -50,7 +50,7 @@ class BuzzTypingRuntimeBackend:
             self.provider = provider
         else:
             self._key = (provider.config["community"], provider.config["channel"], provider.config["author"])
-            stream = _stream_pool.acquire(*self._key, provider.config.get("executable"))
+            stream = _stream_pool.acquire(*self._key, provider.config.get("executable"), wake=wake)
             self.provider = BuzzTypingTransitionsProvider(config=dict(provider.config), stream=stream)
         self.store = store
         self.repository = BuzzTypingRepository(store)
@@ -64,4 +64,4 @@ class BuzzTypingRuntimeBackend:
 
     def stop(self) -> None:
         if self._key is not None:
-            _stream_pool.release(self._key)
+            _stream_pool.release(self._key, self._wake)

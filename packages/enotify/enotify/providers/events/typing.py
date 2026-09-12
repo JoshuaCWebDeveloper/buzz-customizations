@@ -335,6 +335,7 @@ class _TypingStreamPool:
         self._stream_factory = stream_factory or BuzzTypingLiveStream
         self._streams: dict[tuple[str, str, str], BuzzTypingLiveStream] = {}
         self._refs: dict[tuple[str, str, str], int] = {}
+        self._callbacks: dict[tuple[str, str, str], list[Callable[[], None]]] = {}
 
     def stream(self, community: str, channel: str, author: str, executable: str | None = None) -> BuzzTypingLiveStream:
         key = (community, channel, author)
@@ -342,22 +343,36 @@ class _TypingStreamPool:
             stream = self._streams.get(key)
             if stream is None:
                 if self._stream_factory is BuzzTypingLiveStream:
-                    stream = self._stream_factory(*key, wake=self._wake.set, executable=executable)
+                    stream = self._stream_factory(*key, wake=lambda: self._signal(key), executable=executable)
                 else:
-                    stream = self._stream_factory(*key, wake=self._wake.set)
+                    stream = self._stream_factory(*key, wake=lambda: self._signal(key))
                 self._streams[key] = stream
             self._wake.set()
             return stream
 
-    def acquire(self, community: str, channel: str, author: str, executable: str | None = None) -> BuzzTypingLiveStream:
+    def acquire(
+        self,
+        community: str,
+        channel: str,
+        author: str,
+        executable: str | None = None,
+        wake: Callable[[], None] | None = None,
+    ) -> BuzzTypingLiveStream:
         key = (community, channel, author)
         with self._lock:
             stream = self.stream(community, channel, author, executable)
             self._refs[key] = self._refs.get(key, 0) + 1
+            if wake is not None:
+                self._callbacks.setdefault(key, []).append(wake)
             return stream
 
-    def release(self, key: tuple[str, str, str]) -> None:
+    def release(self, key: tuple[str, str, str], wake: Callable[[], None] | None = None) -> None:
         with self._lock:
+            callbacks = self._callbacks.get(key, [])
+            if wake is not None and wake in callbacks:
+                callbacks.remove(wake)
+            if not callbacks:
+                self._callbacks.pop(key, None)
             count = self._refs.get(key, 0)
             if count > 1:
                 self._refs[key] = count - 1
@@ -366,6 +381,13 @@ class _TypingStreamPool:
             stream = self._streams.pop(key, None)
         if stream is not None:
             stream.close()
+
+    def _signal(self, key: tuple[str, str, str]) -> None:
+        self._wake.set()
+        with self._lock:
+            callbacks = tuple(self._callbacks.get(key, ()))
+        for callback in callbacks:
+            callback()
 
     def prune(self, active: set[tuple[str, str, str]]) -> None:
         with self._lock:
@@ -391,6 +413,7 @@ class _TypingStreamPool:
             streams = list(self._streams.values())
             self._streams.clear()
             self._refs.clear()
+            self._callbacks.clear()
         for stream in streams:
             stream.close()
 
