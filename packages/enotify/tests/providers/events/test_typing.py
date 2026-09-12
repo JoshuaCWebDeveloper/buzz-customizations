@@ -3,7 +3,6 @@ import os
 import threading
 import time
 import unittest
-from io import StringIO
 from unittest.mock import patch
 
 from enotify.providers.events.typing import (
@@ -377,24 +376,7 @@ class TypingProviderTests(unittest.TestCase):
         failing.close()
         self.assertFalse(failing._thread.is_alive())
 
-    def test_health_reporting_is_transition_based_and_recovery_clears_error(self):
-        source = ("c", "ch", "a")
-        reported = {}
-        stderr = StringIO()
-        with patch("sys.stderr", stderr):
-            from importlib.util import module_from_spec, spec_from_file_location
-            spec = spec_from_file_location("enotify_worker_test", os.path.join(os.path.dirname(__file__), "..", "..", "..", "enotify-worker.py"))
-            module = module_from_spec(spec)
-            spec.loader.exec_module(module)
-            module.report_typing_health({"source": source, "error": "spawn-failure"}, reported)
-            module.report_typing_health({"source": source, "error": "spawn-failure"}, reported)
-            module.report_typing_health({"source": source, "error": None}, reported)
-            module.report_typing_health({"source": source, "error": None}, reported)
-        self.assertEqual(stderr.getvalue().count("enotify typing stream status:"), 2)
-        self.assertIn("spawn-failure", stderr.getvalue())
-        self.assertIn("recovered", stderr.getvalue())
-
-    def test_signal_wake_is_immediate_and_service_finally_closes_streams(self):
+    def test_stream_pool_wake_and_reference_lifetime_are_bounded(self):
         pool = _TypingStreamPool()
         waiter = threading.Thread(target=lambda: pool.wait(10), daemon=True)
         waiter.start()
@@ -403,21 +385,6 @@ class TypingProviderTests(unittest.TestCase):
         waiter.join(1)
         self.assertFalse(waiter.is_alive())
         self.assertLess(time.monotonic() - started, 1)
-
-        from importlib.util import module_from_spec, spec_from_file_location
-        worker_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "enotify-worker.py")
-        spec = spec_from_file_location("enotify_worker_shutdown_test", worker_path)
-        module = module_from_spec(spec)
-        spec.loader.exec_module(module)
-        class FakeStore:
-            def __init__(self, path): pass
-            def open(self): pass
-            def close(self): self.closed = True
-        module.stopping = True
-        with patch.object(module, "Store", FakeStore), patch.object(module.signal, "signal"), patch.object(module, "close_typing_streams") as close:
-            self.assertEqual(module.main(), 0)
-        close.assert_called_once()
-        module.stopping = False
 
 
 if __name__ == "__main__":

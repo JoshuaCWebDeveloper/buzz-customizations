@@ -8,6 +8,8 @@ from pathlib import Path
 from enotify.providers.events import EventOccurrence
 from enotify.models import NotificationAddressSpec
 from enotify.storage import Conflict, Store
+from enotify.providers.events.typing import BuzzTypingTransitionsProvider
+from enotify.providers.events.typing_storage import BuzzTypingRepository
 from tests.helpers import specs
 
 
@@ -186,14 +188,16 @@ class StorageTests(unittest.TestCase):
                 store = Store(path)
                 store.open()
                 try:
-                    return store.process_typing_tick("buzz", "typing-source", "tick", 100, 100, 8, make, lambda _: True)
+                    provider = BuzzTypingTransitionsProvider(config={"community": "c", "channel": "ch", "author": "a", "ttl": 8})
+                    return BuzzTypingRepository(store).poll(provider, "missing-subscription", provider.source, [{"id": "tick", "created_at": 100}], 100)
                 finally:
                     store.close()
             with ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(apply, (1, 2)))
             self.assertEqual(sum(len(result) for result in results), 1)
             check = self.open_store(directory)
-            self.assertEqual(check.typing_projection("buzz", "typing-source")["expires_at"], 108)
+            provider = BuzzTypingTransitionsProvider(config={"community": "c", "channel": "ch", "author": "a", "ttl": 8})
+            self.assertEqual(BuzzTypingRepository(check).projection("buzz", provider.source)["expires_at"], 108)
             check.close()
 
     def test_late_acceptance_is_recorded_without_resurrection(self):

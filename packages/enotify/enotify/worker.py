@@ -1,12 +1,13 @@
-"""Injectable delivery orchestration; external I/O never spans a DB transaction."""
+"""Provider-agnostic delivery orchestration; provider I/O never spans a DB transaction."""
 from __future__ import annotations
 
-from typing import Callable
-import uuid
+from typing import Any, Callable
 import time
+import uuid
 
-from .providers.events import EventOccurrence, EventProvider
+from .providers.events.interface import EventOccurrence
 from .providers.notifications import NotificationProvider, SendResult
+from .runtime import RuntimeRegistry, default_runtime_registry
 from .storage import Store
 
 
@@ -14,78 +15,55 @@ class Worker:
     def __init__(
         self,
         store: Store,
-        event_provider: EventProvider,
+        runtime: Any,
         notification_provider: NotificationProvider,
         max_attempts: int = 3,
         owner: str | None = None,
         clock: Callable[[], int] | None = None,
+        runtime_registry: RuntimeRegistry | None = None,
     ):
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
         self.store = store
-        self.event_provider = event_provider
+        self.runtime = runtime
         self.notification_provider = notification_provider
         self.max_attempts = max_attempts
         self.owner = owner or f"worker-{uuid.uuid4()}"
         self.clock = clock or (lambda: int(time.time()))
-
-    def next_due(self) -> int | None:
-        """Return the provider deadline for a shared non-blocking scheduler."""
-        due = getattr(self.event_provider, "next_due", None)
-        return due() if due is not None else None
+        self.runtime_registry = runtime_registry
 
     def process(self, subscription: dict, render: Callable[[EventOccurrence], str]) -> None:
-        match = subscription["event_trigger"].get("match", {})
-        source = getattr(self.event_provider, "source", None) or match.get("channel") or match.get("repository") or str(match.get("pid", "default"))
-        observe_ticks = getattr(self.event_provider, "observe_ticks", None)
-        restore = getattr(self.event_provider, "restore", None) if observe_ticks is None else None
-        projection = getattr(self.store, "typing_projection", None)
-        snapshot = projection(self.event_provider.provider, source) if projection else None
-        if restore is not None and snapshot is not None:
-            restore(snapshot)
-        cursor = self.store.checkpoint(self.event_provider.provider, source)
-        process_tick = getattr(self.store, "process_typing_tick", None)
-        expire = getattr(self.store, "expire_typing", None)
-        if observe_ticks is not None and process_tick is not None and expire is not None:
-            self.store.ensure_typing_consumer(subscription["id"], source)
+        handle = self.runtime
+        owned = False
+        if not all(hasattr(handle, method) for method in ("start", "observe", "advance")):
+            handle = (self.runtime_registry or default_runtime_registry()).bind(handle, store=self.store, subscription=subscription)
+            owned = True
+        try:
+            # Service-managed handles are started when they are bound.  A
+            # standalone Worker still starts an unstarted handle, while
+            # repeated service passes only observe/advance it.
+            if not getattr(handle, "_started", False):
+                handle.start()
             observed_at = self.clock()
-            make = self.event_provider.transition_occurrence
-            matches = self.event_provider._matches
-            for occurrence in expire(self.event_provider.provider, source, observed_at, make, matches):
-                self._process_occurrence(subscription, occurrence, render, False)
-            ttl = self.event_provider.config["ttl"]
-            for tick in observe_ticks(cursor, observed_at):
-                for occurrence in process_tick(self.event_provider.provider, source, tick["id"], tick["created_at"], observed_at, ttl, make, matches):
-                    self._process_occurrence(subscription, occurrence, render, False)
-            # Ingestion is source-scoped; every active subscription independently
-            # reserves matching durable occurrences (including ones ingested by a
-            # sibling subscription with another direction/address).
-            for occurrence in self.store.typing_consumer_occurrences(subscription["id"], source):
-                if matches(occurrence):
-                    self._process_occurrence(subscription, occurrence, render, False)
-                self.store.advance_typing_consumer(subscription["id"], source, occurrence.cursor, occurrence.occurrence_id)
-            return
-        # Due transitions are advanced before relay input, and never by a
-        # provider blocking in observe(). Providers without the optional
-        # boundary retain the original behavior.
-        advance = getattr(self.event_provider, "advance", None)
-        if advance is not None:
-            for occurrence in advance(int(__import__("time").time())):
+            cursor = self.store.checkpoint(handle.provider, handle.source)
+            for occurrence in handle.advance(observed_at):
                 self._process_occurrence(subscription, occurrence, render)
-        for occurrence in self.event_provider.observe(cursor):
-            self._process_occurrence(subscription, occurrence, render)
+                handle.ack(occurrence)
+            for occurrence in handle.observe(cursor, observed_at):
+                self._process_occurrence(subscription, occurrence, render)
+                handle.ack(occurrence)
+        finally:
+            if owned:
+                handle.stop()
 
     def _process_occurrence(self, subscription: dict, occurrence: EventOccurrence,
-                            render: Callable[[EventOccurrence], str], persist_projection: bool = True) -> None:
+                            render: Callable[[EventOccurrence], str]) -> None:
         current = self.store.get(subscription["id"])
         if current["state"] != "active":
             return
-        snapshot = getattr(self.event_provider, "snapshot", None)
-        occurrence_row = self.store.record_occurrence(occurrence, snapshot() if snapshot and persist_projection else None)
+        occurrence_row = self.store.record_occurrence(occurrence)
         reservation = self.store.reserve(subscription["id"], occurrence_row["id"])
         if reservation is None:
-            # A one-subscription already has a selected occurrence. Never
-            # silently advance to a later event.
             return
         self._deliver(reservation, occurrence, render)
 
@@ -95,22 +73,15 @@ class Worker:
             return False
         return self._deliver(reservation, occurrence, render)
 
-    def _deliver(
-        self,
-        reservation: dict,
-        occurrence: EventOccurrence,
-        render: Callable[[EventOccurrence], str],
-    ) -> bool:
+    def _deliver(self, reservation: dict, occurrence: EventOccurrence, render: Callable[[EventOccurrence], str]) -> bool:
         while True:
             claim = self.store.claim(reservation["id"], self.owner)
             if claim is None:
                 return False
             attempt = claim["attempt"]
             try:
-                result = self.notification_provider.send(
-                    render(occurrence), reservation["delivery_key"]
-                )
-            except Exception as exc:  # provider boundary: unexpected failures are retryable
+                result = self.notification_provider.send(render(occurrence), reservation["delivery_key"])
+            except Exception as exc:
                 result = SendResult.retryable(str(exc))
             if result.outcome == "accepted":
                 if not result.receipt:
@@ -118,13 +89,7 @@ class Worker:
                 else:
                     self.store.accepted(reservation["id"], attempt, result.receipt)
                     return True
-            state = self.store.failed(
-                reservation["id"],
-                attempt,
-                result.outcome,
-                result.error or "provider failure",
-                self.max_attempts,
-            )
+            state = self.store.failed(reservation["id"], attempt, result.outcome, result.error or "provider failure", self.max_attempts)
             if state != "retryable":
                 return False
             reservation = self.store.reservation(reservation["id"])

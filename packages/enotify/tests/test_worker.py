@@ -9,6 +9,7 @@ from enotify.providers.notifications import SendResult
 from enotify.storage import Store
 from enotify.worker import Worker
 from enotify.providers.events.typing import BuzzTypingTransitionsProvider
+from enotify.providers.events.typing_storage import BuzzTypingRepository
 from tests.helpers import specs
 
 
@@ -125,12 +126,12 @@ class WorkerTests(unittest.TestCase):
             provider = BuzzTypingTransitionsProvider(run, dict(event.match), lambda: 100)
             sender = FakeNotifications([SendResult.accepted("start")])
             Worker(store, provider, sender, clock=lambda: 100).process(subscription, lambda occurrence: occurrence.payload["direction"])
-            self.assertEqual(store.typing_projection("buzz", provider.source)["expires_at"], 108)
+            self.assertEqual(BuzzTypingRepository(store).projection("buzz", provider.source)["expires_at"], 108)
             restarted = BuzzTypingTransitionsProvider(run, dict(event.match), lambda: 108)
             sender2 = FakeNotifications([SendResult.accepted("stop")])
             Worker(store, restarted, sender2, clock=lambda: 108).process(subscription, lambda occurrence: occurrence.payload["direction"])
             self.assertEqual(sender2.keys, [sender2.keys[0]])
-            self.assertEqual(store.typing_projection("buzz", provider.source)["active"], 0)
+            self.assertEqual(BuzzTypingRepository(store).projection("buzz", provider.source)["active"], 0)
             store.close()
 
     def test_same_source_fans_out_durable_transition_to_both_subscriptions(self):
@@ -194,7 +195,7 @@ class WorkerTests(unittest.TestCase):
                 class Result: pass
                 result = Result(); result.stdout = json.dumps({"community": "c"} if "channels" in command else []); return result
             provider = BuzzTypingTransitionsProvider(run, match)
-            occurrence = store.process_typing_tick("buzz", provider.source, "tick-1", 100, 100, 8, provider.transition_occurrence, lambda _: True)[0]
+            occurrence = BuzzTypingRepository(store).poll(provider, subscription["id"], provider.source, [{"id": "tick-1", "created_at": 100}], 100)[0]
             # Simulate process death here: the durable occurrence exists, but
             # no reservation has been created yet.
             sender = FakeNotifications([SendResult.accepted("recovered")])
@@ -211,14 +212,15 @@ class WorkerTests(unittest.TestCase):
             event = event.__class__("buzz", "typing-transitions", 1, match)
             subscription = store.create("all", event, notification)
             provider = BuzzTypingTransitionsProvider(config=match)
-            store.process_typing_tick("buzz", provider.source, "tick-1", 100, 100, 8, provider.transition_occurrence, lambda _: True)
-            initial = store.typing_consumer_occurrences(subscription["id"], provider.source)[0]
-            store.advance_typing_consumer(subscription["id"], provider.source, initial.cursor, initial.occurrence_id)
-            store.process_typing_tick("buzz", provider.source, "tick-2", 108, 108, 8, provider.transition_occurrence, lambda _: True)
-            pending = store.typing_consumer_occurrences(subscription["id"], provider.source)
+            repository = BuzzTypingRepository(store)
+            repository.poll(provider, subscription["id"], provider.source, [{"id": "tick-1", "created_at": 100}], 100)
+            initial = repository.consumer_occurrences(subscription["id"], provider.source)[0]
+            repository.advance_consumer(subscription["id"], provider.source, initial.cursor, initial.occurrence_id)
+            repository.poll(provider, subscription["id"], provider.source, [{"id": "tick-2", "created_at": 108}], 108)
+            pending = repository.consumer_occurrences(subscription["id"], provider.source)
             self.assertEqual([item.payload["direction"] for item in pending], ["stopped", "started"])
-            store.advance_typing_consumer(subscription["id"], provider.source, pending[0].cursor, pending[0].occurrence_id)
-            after_restart = store.typing_consumer_occurrences(subscription["id"], provider.source)
+            repository.advance_consumer(subscription["id"], provider.source, pending[0].cursor, pending[0].occurrence_id)
+            after_restart = repository.consumer_occurrences(subscription["id"], provider.source)
             self.assertEqual([item.payload["direction"] for item in after_restart], ["started"])
             store.close()
 
