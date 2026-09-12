@@ -2,11 +2,13 @@ import ast
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from enotify.models import EventTriggerSpec, NotificationAddressSpec
 from enotify.providers.events.interface import EventOccurrence
 from enotify.providers.notifications import SendResult
 from enotify.runtime import RuntimeRegistry, WakeCoordinator
+from enotify.service import EnotifyService
 from enotify.storage import Store
 from enotify.worker import Worker
 
@@ -18,6 +20,11 @@ class FakeProvider:
 
     def __init__(self, source="fake-source"):
         self.source = source
+
+
+class ConfigFakeProvider(FakeProvider):
+    def __init__(self, config=None):
+        super().__init__((config or {}).get("source", "fake-source"))
 
 
 class FakeExtension:
@@ -134,6 +141,34 @@ class FakeNotifications:
         return SendResult.accepted("fake-receipt")
 
 
+class ConfigFakeNotifications(FakeNotifications):
+    def __init__(self, config=None):
+        self.config = config or {}
+
+    def render(self, occurrence):
+        return "ready"
+
+
+class PlainProvider:
+    provider = "plain"
+    capability = "stateless"
+    source = "plain-source"
+
+    def __init__(self):
+        self.starts = 0
+        self.stops = 0
+
+    def start(self, wake):
+        self.starts += 1
+        wake()
+
+    def observe(self, cursor):
+        return ()
+
+    def stop(self):
+        self.stops += 1
+
+
 class RuntimeTests(unittest.TestCase):
     def open_store(self, directory, extension=None):
         return Store(Path(directory) / "state.sqlite", extensions={("fake", "stateful"): extension} if extension else {})
@@ -200,6 +235,68 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(restarted.db.execute("SELECT COUNT(*) FROM event_occurrences").fetchone()[0], 1)
             restarted.close()
 
+    def test_unbound_generic_backend_stops_once_after_last_handle(self):
+        provider = PlainProvider()
+        registry = RuntimeRegistry(WakeCoordinator())
+        first = registry.bind(provider)
+        second = registry.bind(provider)
+        first.stop()
+        self.assertEqual(provider.stops, 0)
+        second.stop()
+        self.assertEqual(provider.stops, 1)
+
+    def test_supervisor_exception_cleans_handles_restores_signals_and_closes_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open_store(directory)
+            store.open()
+            FakeBackend.created = FakeBackend.stopped = 0
+            registry = RuntimeRegistry(WakeCoordinator())
+            registry.register("fake", "stateful", FakeBackend)
+            handle = registry.bind(FakeProvider(), store=store, subscription={"id": "x"})
+            service = EnotifyService(store, registry)
+            service.bindings["x"] = ((1, "fake"), handle)
+            service.step = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+            with patch("enotify.service.signal.signal", return_value="previous") as signals:
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    service.run()
+            self.assertEqual(handle.runtime.stops, 1)
+            self.assertEqual(FakeBackend.stopped, 1)
+            self.assertIsNone(store.db)
+            self.assertEqual(signals.call_count, 4)
+
+    def test_supervisor_rebinds_active_revision_to_new_source_and_wakes_on_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            FakeBackend.created = FakeBackend.stopped = 0
+            store = self.open_store(directory, FakeExtension())
+            store.open()
+            event, notification = self.specs()
+            subscription = store.create("all", event, notification)
+            registry = RuntimeRegistry(WakeCoordinator())
+            registry.register("fake", "stateful", FakeBackend)
+            service = EnotifyService(store, registry)
+            fake_events = type("Events", (), {"get": lambda self, *_: ConfigFakeProvider()})()
+            fake_notifications = type("Notifications", (), {"get": lambda self, *_: ConfigFakeNotifications()})()
+            with patch("enotify.service.event_registry", return_value=fake_events), patch(
+                "enotify.service.notification_registry", return_value=fake_notifications
+            ):
+                service.step()
+                old = service.bindings[subscription["id"]][1]
+                updated = store.update(
+                    subscription["id"], subscription["revision"],
+                    event=EventTriggerSpec("fake", "stateful", 1, {"source": "new-source"}),
+                )
+                service.step()
+                new = service.bindings[subscription["id"]][1]
+            self.assertIsNot(old, new)
+            self.assertEqual(old.runtime.stops, 1)
+            self.assertEqual(new.runtime.starts, 1)
+            self.assertEqual(FakeBackend.stopped, 1)
+            service.stop()
+            self.assertTrue(registry.wake.wait(0))
+            service.bindings[subscription["id"]][1].stop()
+            registry.close()
+            store.close()
+
     def test_runtime_deadline_conversion_uses_monotonic_wait_and_supervisor_cleanup(self):
         registry = RuntimeRegistry(WakeCoordinator())
         class Runtime:
@@ -215,6 +312,28 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(registry.wait_timeout(30, 108.0, 500.0), 0.0)
         registry.close()
         self.assertTrue(runtime.stopped)
+
+    def test_supervisor_health_keeps_same_source_labels_per_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open_store(directory)
+            store.open()
+            registry = RuntimeRegistry(WakeCoordinator())
+            class HealthRuntime:
+                def __init__(self, provider):
+                    self.provider = provider
+                def next_deadline(self, now):
+                    return None
+                def health(self):
+                    return {"provider": self.provider, "source": "shared", "error": "down"}
+                def stop(self):
+                    return None
+            registry._backends[("one", "stateful", "shared")] = (HealthRuntime("one"), 1)
+            registry._backends[("two", "stateful", "shared")] = (HealthRuntime("two"), 1)
+            service = EnotifyService(store, registry)
+            service.step()
+            self.assertEqual(set(service.reported_health), {("one", "shared"), ("two", "shared")})
+            registry.close()
+            store.close()
 
     def test_provider_transaction_rolls_back_common_occurrence_and_recovers_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:

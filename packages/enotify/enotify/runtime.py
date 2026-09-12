@@ -45,6 +45,7 @@ class WakeCoordinator:
 class RuntimeHandle:
     runtime: EventRuntime
     release: Callable[[], None]
+    binding_cleanup: bool = True
     _started: bool = False
     _stopped: bool = False
 
@@ -61,7 +62,8 @@ class RuntimeHandle:
         if self._stopped:
             return
         self._stopped = True
-        self.runtime.stop()
+        if self.binding_cleanup:
+            self.runtime.stop()
         self.release()
 
 
@@ -141,7 +143,7 @@ class RuntimeRegistry:
 
         has_binding = hasattr(runtime, "bind")
         binding = runtime.bind(**kwargs) if has_binding else runtime
-        return RuntimeHandle(binding, release, _started=not has_binding)
+        return RuntimeHandle(binding, release, has_binding, _started=not has_binding)
 
     def deadlines(self, wall_now: int) -> list[int]:
         return [deadline for runtime, _ in self._backends.values()

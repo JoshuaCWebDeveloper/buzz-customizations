@@ -32,8 +32,8 @@ class EnotifyService:
         self.wall_clock = wall_clock or time.time
         self.monotonic_clock = monotonic_clock or time.monotonic
         self.stopping = False
-        self.bindings: dict[str, Any] = {}
-        self.reported_health: dict[str, Any] = {}
+        self.bindings: dict[str, tuple[tuple[Any, ...], Any]] = {}
+        self.reported_health: dict[tuple[str, str], Any] = {}
 
     def stop(self, *_args: Any) -> None:
         self.stopping = True
@@ -49,10 +49,22 @@ class EnotifyService:
                 timeout = self.runtimes.wait_timeout(self.interval, self.wall_clock(), self.monotonic_clock())
                 self.runtimes.wake.wait(timeout)
         finally:
-            for signum, handler in previous.items():
-                signal.signal(signum, handler)
-            self.runtimes.close()
-            self.store.close()
+            try:
+                for signum, handler in previous.items():
+                    signal.signal(signum, handler)
+            finally:
+                try:
+                    for _identity, binding in list(self.bindings.values()):
+                        try:
+                            binding.stop()
+                        except Exception as exc:
+                            print(f"enotify binding cleanup failed: {type(exc).__name__}", file=sys.stderr)
+                    self.bindings.clear()
+                finally:
+                    try:
+                        self.runtimes.close()
+                    finally:
+                        self.store.close()
         return 0
 
     def step(self) -> None:
@@ -67,10 +79,24 @@ class EnotifyService:
                 event_provider = type(event_provider)(config=dict(event.match))
                 notification_provider = notification_registry().get(notification.provider, notification.notification_type)
                 notification_provider = type(notification_provider)(config=dict(notification.address))
-                binding = self.bindings.get(subscription["id"])
-                if binding is None:
+                identity = (
+                    subscription.get("revision"),
+                    event.provider,
+                    event.event_type,
+                    getattr(event_provider, "capability", "default"),
+                    getattr(event_provider, "source", event.match.get("source", "default")),
+                    repr(sorted(event.match.items())),
+                )
+                current = self.bindings.get(subscription["id"])
+                if current is not None and current[0] != identity:
+                    current[1].stop()
+                    del self.bindings[subscription["id"]]
+                    current = None
+                if current is None:
                     binding = self.runtimes.bind(event_provider, store=self.store, subscription=subscription)
-                    self.bindings[subscription["id"]] = binding
+                    self.bindings[subscription["id"]] = (identity, binding)
+                else:
+                    binding = current[1]
                 Worker(self.store, binding, notification_provider, runtime_registry=self.runtimes,
                        clock=lambda: int(self.wall_clock())).process(
                     subscription,
@@ -80,9 +106,9 @@ class EnotifyService:
             except Exception as exc:
                 print(f"enotify provider unavailable: {type(exc).__name__}", file=sys.stderr)
         for subscription_id in set(self.bindings) - active_ids:
-            self.bindings.pop(subscription_id).stop()
+            self.bindings.pop(subscription_id)[1].stop()
         for health in self.runtimes.health():
-            source = str(health.get("source", "default"))
+            source = (str(health.get("provider", "default")), str(health.get("source", "default")))
             current = health.get("error")
             if self.reported_health.get(source) == current:
                 continue
