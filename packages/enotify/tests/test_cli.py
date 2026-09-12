@@ -42,6 +42,13 @@ class CliTests(unittest.TestCase):
             self.assertEqual(create()["frequency"], "all")
             self.assertEqual(create("--frequency", "one")["frequency"], "one")
             self.assertEqual(create("--frequency", "all")["frequency"], "all")
+            with sqlite3.connect(database) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT frequency FROM subscriptions ORDER BY rowid"
+                    ).fetchall(),
+                    [("all",), ("one",), ("all",)],
+                )
 
     def test_invalid_content_is_rejected_during_create_and_update(self):
         cli = load_cli()
