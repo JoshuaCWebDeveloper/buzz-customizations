@@ -5,7 +5,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from enotify.providers.events.typing import (
+from enotify.typing.provider import (
     BuzzTypingLiveStream,
     BuzzTypingTransitionsProvider,
     _TypingStreamPool,
@@ -116,7 +116,7 @@ class TypingProviderTests(unittest.TestCase):
         def run(command, **kwargs):
             calls.append((command, kwargs))
             return Result()
-        stream = __import__("enotify.providers.events.typing", fromlist=["_RunnerTypingLiveStream"])._RunnerTypingLiveStream(
+        stream = __import__("enotify.typing.provider", fromlist=["_RunnerTypingLiveStream"])._RunnerTypingLiveStream(
             run, {"community": "community", "channel": "channel", "author": "author", "executable": "/srv/buzz-events"}
         )
         with patch.dict(os.environ, {"BUZZ_AUTH_TAG": "tag"}, clear=True):

@@ -4,10 +4,10 @@ from __future__ import annotations
 from typing import Any, Callable
 import subprocess
 
-from ...providers.events.interface import EventOccurrence
-from ...runtime import WakeCoordinator
-from .typing import BuzzTypingTransitionsProvider, _stream_pool
-from .typing_storage import BuzzTypingRepository
+from ..providers.events.interface import EventOccurrence
+from ..runtime import WakeCoordinator
+from .provider import BuzzTypingTransitionsProvider, _stream_pool
+from .storage import BuzzTypingRepository
 
 
 class BuzzTypingRuntimeHandle:

@@ -14,6 +14,6 @@ class StorageExtension(Protocol):
 
 
 def default_extensions() -> dict[tuple[str, str], StorageExtension]:
-    from .providers.events.typing_storage import BuzzTypingStorageExtension
+    from .typing.storage import BuzzTypingStorageExtension
     extension = BuzzTypingStorageExtension()
     return {(extension.provider, extension.capability): extension}

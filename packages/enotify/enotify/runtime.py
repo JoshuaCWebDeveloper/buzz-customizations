@@ -195,6 +195,6 @@ class RuntimeRegistry:
 
 def default_runtime_registry(wake: WakeCoordinator | None = None) -> RuntimeRegistry:
     registry = RuntimeRegistry(wake)
-    from .providers.events.typing_runtime import BuzzTypingRuntimeBackend
+    from .typing.runtime import BuzzTypingRuntimeBackend
     registry.register("buzz", "typing-transitions", BuzzTypingRuntimeBackend)
     return registry
