@@ -7,6 +7,7 @@ from unittest.mock import patch
 from enotify.providers.events.buzz import BuzzChannelEventsProvider
 from enotify.providers.events.github import GitHubCheckProvider
 from enotify.providers.events.system_process import SystemProcessExitedProvider
+from enotify.credentials import CredentialResolver
 
 
 class Result:
@@ -37,11 +38,11 @@ class LiveProviderTests(unittest.TestCase):
 
     def test_github_matches_nested_check_and_pr(self):
         responses = {
-            "commits": [{"sha": "abc"}],
+            "pull": {"head": {"sha": "abc"}},
             "runs": {"check_runs": [{"id": 7, "name": "ci", "status": "completed", "conclusion": "success", "pull_requests": [{"number": 4}]}]},
         }
         def fetch(url):
-            return responses["commits"] if "/commits?" in url else responses["runs"]
+            return responses["pull"] if "/pulls/4" in url else responses["runs"]
         provider = GitHubCheckProvider(fetch, {"repository": "o/r", "check": {"name": {"equals": "ci"}}, "pull_request": {"number": 4}})
         self.assertTrue(list(provider.observe())[0].occurrence_id.startswith("7:"))
 
@@ -85,6 +86,24 @@ class LiveProviderTests(unittest.TestCase):
             "pull_request": {"number": 4},
         })
         self.assertEqual(len(list(provider.observe())), 1)
+
+    def test_github_request_uses_resolved_reference_without_persisting_token(self):
+        class Response:
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return None
+            def read(self):
+                return b"{}"
+
+        resolver = CredentialResolver({"GITHUB_TOKEN": "unit-value"})
+        provider = GitHubCheckProvider(config={"repository": "o/r", "check": {"name": {"equals": "ci"}}},
+                                       credential_resolver=resolver)
+        with patch("enotify.providers.events.github.urlopen", return_value=Response()) as open_url:
+            provider._request("https://api.github.com/repos/o/r/pulls/4")
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer unit-value")
+        self.assertNotIn("unit-value", provider.config)
 
     def test_github_transition_identity_and_cursor(self):
         runs = [{"id": 7, "name": "ci", "status": "queued", "conclusion": None, "updated_at": "2026-01-01T00:00:01Z"}]
