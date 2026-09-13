@@ -7,8 +7,10 @@ class CredentialTests(unittest.TestCase):
     def test_service_reference_is_structured_and_allowlisted(self):
         reference = CredentialReference.from_mapping({"scope": "service", "name": "github"})
         self.assertEqual(CredentialResolver.validate(reference, ("github",)).mapping(), {"scope": "service", "name": "github"})
-        with self.assertRaisesRegex(ValueError, "unsupported credential_ref.name"):
-            CredentialResolver.validate(CredentialReference.from_mapping({"scope": "service", "name": "other"}), ("github",))
+        token_shaped = "ghp_redactedexample"
+        with self.assertRaises(ValueError) as error:
+            CredentialResolver.validate(CredentialReference.from_mapping({"scope": "service", "name": token_shaped}), ("github",))
+        self.assertNotIn(token_shaped, str(error.exception))
         with self.assertRaises(ValueError):
             CredentialReference.from_mapping({"scope": "service", "name": "Bearer raw-token"})
 

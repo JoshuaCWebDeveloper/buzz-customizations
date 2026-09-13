@@ -52,7 +52,7 @@ class CredentialResolver:
     def validate(reference: CredentialReference, allowed_names: tuple[str, ...]) -> CredentialReference:
         if reference.name not in allowed_names:
             allowed = ", ".join(allowed_names)
-            raise ValueError(f"unsupported credential_ref.name '{reference.name}'; allowed: {allowed}")
+            raise ValueError(f"unsupported credential reference; allowed service references: {allowed}")
         return reference
 
     def resolve(self, reference: CredentialReference, environment_names: tuple[str, ...]) -> str:
