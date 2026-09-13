@@ -38,6 +38,10 @@ class EventProviderTests(unittest.TestCase):
             1,
         )
         self.assertEqual(value["check"]["status"]["in"], ["completed", "queued"])
+        self.assertEqual(value["credential_ref"], {"scope": "service", "name": "github"})
+        with self.assertRaises(ValueError):
+            github.validate_config({"repository": "owner/repo", "check": {"name": {"equals": "ci"}},
+                                   "credential_ref": {"scope": "service", "name": "unknown"}}, 1)
         process = registry.get("system-process", "exited")
         self.assertEqual(
             process.validate_config({"pid": 7, "start_identity": "linux:123"}, 1)["pid"],

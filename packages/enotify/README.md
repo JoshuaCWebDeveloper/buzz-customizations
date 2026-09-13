@@ -7,8 +7,19 @@
 Event and notification specs are JSON-only and deliberately distinct:
 
 ```json
-{"provider":"github","event_type":"check","schema_version":1,"match":{"repository":"owner/repo","check":{"name":{"equals":"ci"},"status":{"in":["completed"]}}}}
+{"provider":"github","event_type":"check","schema_version":1,"match":{"repository":"owner/repo","check":{"name":{"equals":"ci"},"status":{"in":["completed"]}},"pull_request":{"number":42},"credential_ref":{"scope":"service","name":"github"}}}
 ```
+
+When `pull_request` is present, the event provider resolves that PR directly,
+reads its current `head.sha`, and polls check-runs for that SHA. It does not
+depend on the head appearing in the recent default-branch commit listing.
+
+`credential_ref` is a reference, never a token. The currently supported
+reference is `{ "scope": "service", "name": "github" }`. The deployed service
+resolves it from its environment file using `GITHUB_TOKEN` first and
+`GH_TOKEN` second; empty values are skipped. Missing or unsupported references
+fail without changing subscription state, and credentials are never included
+in normalized specs, persisted state, logs, or errors.
 
 ```json
 {"provider":"buzz","notification_type":"message","schema_version":1,"address":{"community":"community-id","channel":"channel-id","mention":{"pubkey":"hex-or-npub","handle":"Alice"}}}

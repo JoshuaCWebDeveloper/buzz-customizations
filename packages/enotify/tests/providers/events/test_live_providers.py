@@ -45,6 +45,47 @@ class LiveProviderTests(unittest.TestCase):
         provider = GitHubCheckProvider(fetch, {"repository": "o/r", "check": {"name": {"equals": "ci"}}, "pull_request": {"number": 4}})
         self.assertTrue(list(provider.observe())[0].occurrence_id.startswith("7:"))
 
+    def test_github_pr_scope_discovers_current_head_directly(self):
+        calls = []
+        responses = {
+            "/pulls/4": {"state": "open", "head": {"sha": "current-head"}},
+            "/commits/current-head/check-runs": {
+                "check_runs": [{"id": 8, "name": "ci", "status": "in_progress", "conclusion": None,
+                                 "updated_at": "2026-01-01T00:00:03Z"}]
+            },
+        }
+
+        def fetch(url):
+            calls.append(url)
+            for suffix, value in responses.items():
+                if suffix in url:
+                    return value
+            raise AssertionError("unexpected GitHub URL")
+
+        provider = GitHubCheckProvider(fetch, {
+            "repository": "o/r", "check": {"name": {"equals": "ci"}},
+            "pull_request": {"number": 4},
+        })
+        occurrences = list(provider.observe())
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(occurrences[0].payload["head_sha"], "current-head")
+        self.assertNotIn("/commits?", " ".join(calls))
+        self.assertIn("/pulls/4", calls[0])
+        self.assertIn("/commits/current-head/check-runs", calls[1])
+
+    def test_github_pr_scope_does_not_require_run_pull_request_metadata(self):
+        def fetch(url):
+            if "/pulls/4" in url:
+                return {"head": {"sha": "current-head"}}
+            return {"check_runs": [{"id": 9, "name": "ci", "status": "completed", "conclusion": "success",
+                                     "updated_at": "2026-01-01T00:00:04Z"}]}
+
+        provider = GitHubCheckProvider(fetch, {
+            "repository": "o/r", "check": {"name": {"equals": "ci"}},
+            "pull_request": {"number": 4},
+        })
+        self.assertEqual(len(list(provider.observe())), 1)
+
     def test_github_transition_identity_and_cursor(self):
         runs = [{"id": 7, "name": "ci", "status": "queued", "conclusion": None, "updated_at": "2026-01-01T00:00:01Z"}]
         provider = GitHubCheckProvider(lambda url: [{"sha": "a"}] if "/commits?" in url else {"check_runs": runs}, {"repository": "o/r", "check": {"name": {"equals": "ci"}}})
