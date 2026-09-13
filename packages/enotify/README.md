@@ -36,7 +36,9 @@ conversions, format specifications, and expressions are rejected during
 subscription create/update validation. Without `content`, typing transitions
 use the compact `Typing {direction}` default; existing addresses remain valid
 without migration. Mentions are still prepended and passed as structured Buzz
-CLI mentions.
+CLI mentions. This structured `--mention` identity is required for
+mentions-only agent wake-up; the readable `@handle` text is presentation, while
+the pubkey is the delivery identity.
 
 Providers reject unknown fields and normalize accepted values before persistence. Event and notification interfaces, registries, implementations, and tests are physically separate; `buzz/channel-events` and `buzz/message` resolve only through their role-specific registries.
 

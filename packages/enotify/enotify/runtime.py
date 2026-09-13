@@ -124,7 +124,7 @@ class RuntimeRegistry:
 
     def __init__(self, wake: WakeCoordinator | None = None):
         self.wake = wake or WakeCoordinator()
-        self._backends: dict[tuple[str, str, str], tuple[EventRuntime, int]] = {}
+        self._backends: dict[tuple[str, ...], tuple[EventRuntime, int]] = {}
         self._factories: dict[tuple[str, str], Callable[..., EventRuntime]] = {}
 
     def register(self, provider: str, capability: str, factory: Callable[..., EventRuntime]) -> None:
@@ -139,10 +139,16 @@ class RuntimeRegistry:
             raise TypeError(f"{kind} is missing required runtime methods: {', '.join(missing)}")
 
     def bind(self, provider: Any, **kwargs: Any) -> RuntimeHandle:
-        key = (provider.provider, provider.capability, getattr(provider, "source", "default"))
+        factory = self._factories.get((provider.provider, provider.capability))
+        # A provider without a registered backend is itself the generic
+        # runtime. Keep that runtime subscription-scoped: unlike a
+        # provider-owned backend, it carries the provider's bound config.
+        subscription = kwargs.get("subscription")
+        subscription_id = subscription.get("id") if isinstance(subscription, dict) else None
+        scope = ("subscription", str(subscription_id)) if factory is None and subscription_id else ("shared",)
+        key = (provider.provider, provider.capability, getattr(provider, "source", "default"), *scope)
         current = self._backends.get(key)
         if current is None:
-            factory = self._factories.get((provider.provider, provider.capability))
             runtime = factory(provider=provider, wake=self.wake.signal, **kwargs) if factory else GenericProviderRuntime(provider, self.wake.signal)
             self._require_runtime_methods(runtime, "runtime backend", ("start", "next_deadline", "health", "stop"))
             runtime.start()
