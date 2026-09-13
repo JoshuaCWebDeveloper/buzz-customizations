@@ -29,15 +29,28 @@ python3 deploy.py install
 Default deploy installs all three runtimes, Claude Code first:
 
 - Claude Code: updates `UserPromptSubmit` in `$CLAUDE_CONFIG_DIR/settings.json` (default `/var/lib/buzz/claude-code/settings.json`), preserves unrelated JSON, writes `settings.json.buzz-customizations-backup` before replacement. No trust step and no `additionalContextLimit`.
-- Codex: updates `UserPromptSubmit` in `$CODEX_HOME/hooks.json`, preserves unrelated JSON, writes `hooks.json.buzz-customizations-backup` before replacement, sets `additionalContextLimit` to `0`, trusts the hook hash in `config.toml`.
-- Grok: registers this package's script as a `session/prompt` command hook in `$CUSTOM_GROK_ACP_HOME/hooks.json` (default `/var/lib/buzz-server/custom-grok-acp.d/hooks.json`) and creates `/var/lib/buzz/channel-context` when possible.
+- Codex: updates `UserPromptSubmit` in `hooks.json` under `--codex-home` (default `/var/lib/buzz/codex/agent-1/.codex`), preserves unrelated JSON, writes `hooks.json.buzz-customizations-backup` before replacement, sets `additionalContextLimit` to `0`, trusts the hook hash in `config.toml`.
+- Grok: registers the hook script as a `session/prompt` command hook in `$CUSTOM_GROK_ACP_HOME/hooks.json` (default `/var/lib/buzz-server/custom-grok-acp.d/hooks.json`) and creates `/var/lib/buzz/channel-context` when possible.
 - `--runtime claude`, `--runtime codex`, or `--runtime grok` installs one side. `--claude-config-dir`, `--codex-home`, `--custom-grok-acp-home`, `--context-home`, `--hook`, and `--codex-bin` override paths.
 
-Install is sequential and not transactional. Claude Code runs first because `install_codex` aborts the whole run when `codex app-server` does not report the hook back, and it is the only step that depends on an external process.
+`--hook` defaults to the installed `/var/lib/buzz-server/channel-context.py`, not to the copy beside `deploy.py`. A checkout path can be an agent-scoped working directory that is later cleaned up, and a hook whose script has gone missing fails open: the runtime reports nothing and context simply stops arriving. Pass `--hook` explicitly to register a checkout on purpose.
+
+`--codex-home` does **not** read `$CODEX_HOME`. Codex homes here are per-agent, so inheriting the variable aims the install at whichever agent happens to be running the deploy. Name the target with `--codex-home` to cover a second agent. `$CLAUDE_CONFIG_DIR`, `$CUSTOM_GROK_ACP_HOME`, and `$BUZZ_CHANNEL_CONTEXT_HOME` are still honored, because each names one shared location rather than a per-agent one.
+
+Install is sequential and not transactional, but one runtime failing no longer skips the rest. Each selected runtime reports `channel-context: <runtime> <action> ok|failed` on stdout, the failure reason goes to stderr, and the exit status is `1` if any of them failed. Claude Code stays first because it is the only step that cannot fail on an external process. Runtimes that already succeeded are not rolled back.
+
+### File ownership
+
+Configs are written atomically, and the replacement keeps the identity the agent runtime expects:
+
+- an existing file keeps its exact mode, uid, and gid;
+- a new file is created `0644` and inherits its directory's uid and gid.
+
+This matters because the Buzz agent runtimes read these files as `ec2-user` while Grok's config directory is root-owned, so a deploy may legitimately need `sudo`. Without the rule above, a `sudo` run would replace an agent-readable config with a `root:root 0600` one — and because the hook fails open, nothing would error; the runtime would just stop injecting context.
 
 Grok injection still requires pointing the agent at the installed `custom-grok-acp` command. This package only registers the hook.
 
-Codex reads a per-agent `$CODEX_HOME`, so one run covers one Codex agent. `CLAUDE_CONFIG_DIR` is shared by every Claude agent using it, so one run covers all of them and there is no per-agent opt-out at the user tier.
+Codex reads a per-agent home, so one run covers one Codex agent. `CLAUDE_CONFIG_DIR` is shared by every Claude agent using it, so one run covers all of them and there is no per-agent opt-out at the user tier.
 
 To remove the customization while preserving other hooks:
 

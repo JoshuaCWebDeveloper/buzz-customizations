@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,15 @@ def deploy_command(action: str, home: Path, hook: Path = HOOK, runtime: str = "a
     if action == "install":
         command.extend(("--hook", str(hook), "--codex-bin", str(fake_codex(home))))
     return command
+
+
+def load_deploy():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("deploy", DEPLOY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def buzz_prompt(scope: str = "thread", uuid: str = UUID) -> str:
@@ -330,11 +340,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(len(grok_groups), 1)
 
     def test_atomic_replacement_leaves_active_config_unchanged_on_replace_failure(self):
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("deploy", DEPLOY)
-        deploy = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(deploy)
+        deploy = load_deploy()
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "hooks.json"
             original = b'{"hooks": {"Stop": []}}\n'
@@ -416,19 +422,106 @@ class ClaudeDeploymentTests(unittest.TestCase):
             self.assertEqual(backup.read_bytes(), first_backup)
             self.assertEqual(json.loads(backup.read_text(encoding="utf-8")), original)
 
-    def test_default_runtime_installs_claude_before_codex(self):
-        """`--runtime all` must reach Claude Code even when the Codex trust step aborts the run."""
+    def test_failing_runtime_does_not_stop_the_others_and_is_reported(self):
+        """A failed Codex step must not hide Claude Code or skip Grok."""
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
             command = deploy_command("install", home)
             command[command.index("--codex-bin") + 1] = str(home / "missing-codex")
             result = subprocess.run(command, capture_output=True)
-            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 1)
+            report = result.stdout.decode()
+            self.assertIn("channel-context: claude install ok", report)
+            self.assertIn("channel-context: codex install failed", report)
+            self.assertIn("channel-context: grok install ok", report)
+            self.assertIn("codex failed:", result.stderr.decode())
             installed = json.loads(self.settings(home).read_text(encoding="utf-8"))
             self.assertEqual(
                 installed["hooks"]["UserPromptSubmit"][0]["__buzz_customization"],
                 "buzz-customizations/channel-context",
             )
+            grok = json.loads((home / "custom-grok-acp.d" / "hooks.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                grok["hooks"]["session/prompt"][0]["__buzz_customization"],
+                "buzz-customizations/channel-context",
+            )
+
+    def test_successful_run_reports_every_selected_runtime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            result = subprocess.run(deploy_command("install", home), capture_output=True)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(
+                result.stdout.decode().splitlines(),
+                [
+                    "channel-context: claude install ok",
+                    "channel-context: codex install ok",
+                    "channel-context: grok install ok",
+                ],
+            )
+
+
+class FilePermissionTests(unittest.TestCase):
+    """A deploy must never hand the agent runtime a config it cannot read."""
+
+    def test_existing_file_keeps_its_mode(self):
+        deploy = load_deploy()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "settings.json"
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(0o640)
+            deploy.write_atomic(path, {"hooks": {}})
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+
+    def test_new_file_is_readable_beyond_the_creating_user(self):
+        deploy = load_deploy()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "settings.json"
+            deploy.write_atomic(path, {"hooks": {}})
+            mode = stat.S_IMODE(path.stat().st_mode)
+            self.assertEqual(mode, 0o644)
+            self.assertTrue(mode & stat.S_IRGRP)
+
+    def test_backup_keeps_the_mode_of_the_file_it_copies(self):
+        deploy = load_deploy()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "hooks.json"
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(0o600)
+            deploy.backup_once(path)
+            backup = path.with_name(path.name + ".buzz-customizations-backup")
+            self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+
+
+class DefaultTargetTests(unittest.TestCase):
+    """Defaults must name the host's real paths, not whatever the caller's environment says."""
+
+    def defaults(self, environment: dict):
+        deploy = load_deploy()
+        with mock.patch.dict(os.environ, environment, clear=False):
+            return deploy.build_parser().parse_args(["install"])
+
+    def test_codex_home_defaults_to_the_agent_home_and_ignores_codex_home_env(self):
+        args = self.defaults({"CODEX_HOME": "/tmp/inherited-from-the-calling-agent"})
+        self.assertEqual(args.codex_home, "/var/lib/buzz/codex/agent-1/.codex")
+
+    def test_hook_defaults_to_the_installed_script_not_this_checkout(self):
+        args = self.defaults({})
+        self.assertEqual(args.hook, "/var/lib/buzz-server/channel-context.py")
+        self.assertNotEqual(Path(args.hook).parent, HERE)
+
+    def test_claude_config_dir_still_honors_its_env_var_unlike_codex_home(self):
+        """`CLAUDE_CONFIG_DIR` names one shared directory, so inheriting it is correct.
+
+        `CODEX_HOME` names a per-agent directory, so inheriting it is not.
+        """
+        environment = {
+            "CLAUDE_CONFIG_DIR": "/tmp/explicit-claude-config",
+            "CODEX_HOME": "/tmp/explicit-codex-home",
+        }
+        args = self.defaults(environment)
+        self.assertEqual(args.claude_config_dir, "/tmp/explicit-claude-config")
+        self.assertEqual(args.codex_home, "/var/lib/buzz/codex/agent-1/.codex")
 
 
 class GrokAdapterIntegrationTests(unittest.TestCase):
