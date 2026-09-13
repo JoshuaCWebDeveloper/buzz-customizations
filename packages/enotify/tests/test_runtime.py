@@ -266,6 +266,25 @@ class RuntimeTests(unittest.TestCase):
         second.stop()
         self.assertEqual(provider.stops, 1)
 
+    def test_generic_provider_bindings_do_not_share_config_between_subscriptions(self):
+        registry = RuntimeRegistry(WakeCoordinator())
+        first = registry.bind(
+            GitHubCheckProvider(config={"repository": "owner/first", "check": {"name": {"equals": "ci"}}}),
+            subscription={"id": "first"},
+        )
+        second = registry.bind(
+            GitHubCheckProvider(config={"repository": "owner/second", "check": {"name": {"equals": "ci"}}}),
+            subscription={"id": "second"},
+        )
+
+        self.assertIsNot(first.runtime, second.runtime)
+        self.assertEqual(first.runtime._provider.config["repository"], "owner/first")
+        self.assertEqual(second.runtime._provider.config["repository"], "owner/second")
+        self.assertEqual(len(registry._backends), 2)
+        first.stop()
+        second.stop()
+        self.assertEqual(registry._backends, {})
+
     def test_registry_rejects_backend_missing_required_method_at_bind(self):
         provider = PlainProvider()
         registry = RuntimeRegistry(WakeCoordinator())
