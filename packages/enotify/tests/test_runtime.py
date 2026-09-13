@@ -1,10 +1,12 @@
 import ast
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from enotify.models import EventTriggerSpec, NotificationAddressSpec
+from enotify.providers.events.github import GitHubCheckProvider
 from enotify.providers.events.interface import EventOccurrence
 from enotify.providers.events.typing import BuzzTypingTransitionsProvider
 from enotify.providers.notifications import SendResult
@@ -302,6 +304,32 @@ class RuntimeTests(unittest.TestCase):
             service.step()
             self.assertEqual(set(service.reported_health), {("buzz", provider.source)})
             handle.stop()
+            registry.close()
+            store.close()
+
+    def test_missing_github_credential_keeps_subscription_active_at_service_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self.open_store(directory)
+            store.open()
+            event = EventTriggerSpec("github", "check", 1, {
+                "repository": "owner/repo",
+                "pull_request": {"number": 4},
+                "check": {"name": {"equals": "ci"}},
+            })
+            notification = NotificationAddressSpec("buzz", "message", 1, {"community": "community", "channel": "channel"})
+            subscription = store.create("all", event, notification)
+            registry = RuntimeRegistry(WakeCoordinator())
+            with patch.dict(os.environ, {"GITHUB_TOKEN": "", "GH_TOKEN": ""}, clear=False), patch(
+                "enotify.service.event_registry"
+            ) as events:
+                events.return_value.get.return_value = GitHubCheckProvider(config=dict(event.match))
+                service = EnotifyService(store, registry)
+                service.step()
+            current = store.get(subscription["id"])
+            self.assertEqual(current["state"], "active")
+            self.assertEqual(current["revision"], subscription["revision"])
+            self.assertEqual(store.status()["open_reservations"], 0)
+            self.assertIsNone(store.checkpoint("github", "owner/repo"))
             registry.close()
             store.close()
 
